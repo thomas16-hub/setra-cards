@@ -1,0 +1,13 @@
+{
+  "name": "Hotel Ruiseñor",
+  "short_name": "Ruiseñor",
+  "city": "Itagüí",
+  "signature": {
+    "sig_hi": 149,
+    "sig_lo": 184,
+    "prefix": 21
+  },
+  "des_key": "god",
+  "sector": 11,
+  "checkout_time": "13:00"
+}

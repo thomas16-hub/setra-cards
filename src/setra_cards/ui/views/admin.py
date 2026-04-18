@@ -11,6 +11,7 @@ from setra_cards import __version__
 from setra_cards.core.app_state import get_state
 from setra_cards.services import auth as auth_service
 from setra_cards.services import encoder_service
+from setra_cards.services import updater as updater_service
 from setra_cards.services.action_log import log as log_action
 from setra_cards.storage.database import app_data_dir, db_path, init_db
 from setra_cards.storage.models import Operator
@@ -39,6 +40,8 @@ def build(page: ft.Page) -> ft.Control:
                 _operators_section(page),
                 ft.Container(height=16),
                 _backup_section(page),
+                ft.Container(height=16),
+                _updates_section(page),
                 ft.Container(height=16),
                 _about_section(page),
             ],
@@ -462,6 +465,79 @@ def _backup_section(page: ft.Page) -> ft.Control:
             ],
             spacing=0,
         ),
+    )
+
+
+# --- Actualizaciones OTA ---
+
+def _updates_section(page: ft.Page) -> ft.Control:
+    status = ft.Container()
+
+    def do_check(e: ft.ControlEvent) -> None:
+        status.content = ft.Row([
+            ft.ProgressRing(width=16, height=16, stroke_width=2, color=theme.TEXT_MUTED),
+            ft.Text("Consultando GitHub...", size=12, color=theme.TEXT_MUTED),
+        ], spacing=10)
+        page.update()
+
+        result = updater_service.check_for_update()
+        if result.error:
+            status.content = ft.Text(f"Error: {result.error}", size=12, color=theme.ERROR)
+        elif result.has_update and result.latest:
+            def do_apply(e2: ft.ControlEvent) -> None:
+                def really_apply() -> None:
+                    try:
+                        show_toast(page, "Actualizando... la app se reiniciara", "info")
+                        updater_service.apply_update(result.latest)
+                    except Exception as exc:
+                        show_toast(page, f"Error aplicando: {exc}", "error")
+
+                confirm_dialog(
+                    page, f"Instalar version {result.latest.version}?",
+                    "La aplicacion se cerrara y volvera a abrir con la nueva version.",
+                    on_confirm=really_apply, confirm_label="Instalar",
+                )
+
+            notes_preview = (result.latest.notes or "").strip()
+            if len(notes_preview) > 200:
+                notes_preview = notes_preview[:200] + "..."
+            status.content = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.NEW_RELEASES, size=18, color=theme.ACCENT),
+                        ft.Text(f"Nueva version disponible: {result.latest.version}",
+                                size=13, weight=ft.FontWeight.W_600, color=theme.ACCENT),
+                    ], spacing=8),
+                    ft.Text(f"Instalada: {result.current_version}", size=11, color=theme.TEXT_MUTED),
+                    ft.Text(notes_preview or "Sin notas", size=11, color=theme.TEXT_MUTED),
+                    ft.Container(height=8),
+                    PrimaryButton("Instalar ahora", icon=ft.Icons.DOWNLOAD, on_click=do_apply),
+                ], spacing=4),
+                padding=ft.Padding(12, 10, 12, 10),
+                bgcolor="#E8F2FF",
+                border=ft.Border.all(1, theme.ACCENT),
+                border_radius=10,
+            )
+        else:
+            status.content = ft.Row([
+                ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=theme.SUCCESS),
+                ft.Text(f"Estas en la ultima version ({result.current_version})",
+                        size=12, color=theme.SUCCESS, weight=ft.FontWeight.W_500),
+            ], spacing=8)
+        page.update()
+
+    return SectionCard(
+        title="Actualizaciones",
+        actions=[PrimaryButton("Buscar actualizacion", icon=ft.Icons.REFRESH, on_click=do_check)],
+        content=ft.Column([
+            ft.Text(
+                "La app se actualiza automaticamente desde GitHub Releases. "
+                "Tambien puedes forzar la busqueda manualmente.",
+                size=12, color=theme.TEXT_MUTED,
+            ),
+            ft.Container(height=10),
+            status,
+        ], spacing=0),
     )
 
 

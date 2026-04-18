@@ -1,0 +1,13 @@
+{
+  "name": "Hotel Plataneras Caney",
+  "short_name": "Caney Turbo",
+  "city": "Turbo",
+  "signature": {
+    "sig_hi": 149,
+    "sig_lo": 184,
+    "prefix": 21
+  },
+  "des_key": "god",
+  "sector": 11,
+  "checkout_time": "12:00"
+}

@@ -1,0 +1,80 @@
+SETRA CARDS v2 - Programacion de tarjetas Locstar
+====================================================
+
+Aplicacion nativa de escritorio (no navegador) que corre 100% local
+en cada PC del hotel. Se conecta al encoder USB para programar las
+tarjetas de las cerraduras Locstar.
+
+REQUISITOS
+----------
+* Windows 10 u 11
+* Encoder USB Locstar conectado
+* Sin conexion a internet necesaria (solo para actualizaciones)
+
+INSTALACION
+-----------
+1. Descomprime toda la carpeta "Setra-CARDS" en cualquier lugar.
+2. Conecta el encoder USB al PC.
+3. Doble-clic en "Instalar.bat".
+4. Elige el hotel con la tecla 1-7:
+      [1] Caney Turbo          [5] Ruisenor Itagui
+      [2] Confort Turbo        [6] Torre Primavera Laureles
+      [3] Plaza Apartado       [7] Vincci Chigorodo
+      [4] Porton Sabaneta
+5. El instalador:
+   - Copia la app a %LOCALAPPDATA%\SetraCARDS
+   - Guarda la configuracion del hotel elegido
+   - Crea acceso directo en el Escritorio
+   - Configura arranque automatico al prender el PC
+6. Listo. Abre la app desde el acceso directo.
+
+USUARIO INICIAL
+---------------
+Operador:  Admin
+PIN:       1234
+La app pedira cambiar el PIN en el primer login.
+
+CARACTERISTICAS
+---------------
+* Gestion completa: huespedes, habitaciones, personal, operadores
+* Emision de tarjetas: Huesped, Maestra, Auth, Clock, Setting, Borrar
+* Auto-deteccion del encoder USB
+* Selector de puerto COM con filtrado inteligente
+* Log completo de actividad con filtros
+* Respaldo manual de base de datos
+* Actualizaciones automaticas desde GitHub Releases
+
+CAMBIAR HOTEL O REINSTALAR
+---------------------------
+Ejecuta "Desinstalar.bat" y luego "Instalar.bat" eligiendo el hotel
+correcto. Para conservar los datos antes de desinstalar, copia:
+      %LOCALAPPDATA%\SETRA\SetraCARDS\
+
+ACTUALIZACIONES
+---------------
+Administracion > "Buscar actualizacion" consulta GitHub Releases.
+Si hay version nueva la descarga, reemplaza el .exe y reinicia la app.
+Los datos (huespedes, tarjetas, operadores) se preservan siempre.
+
+PROBLEMAS FRECUENTES
+--------------------
+* "Encoder no conectado":
+    - Revisa que el cable USB este conectado.
+    - Administracion > Encoder > Detectar automaticamente.
+    - Si no aparece, activa "Mostrar todos los puertos".
+    - Verifica driver USB-Serial en Administrador de dispositivos
+      (suele ser CH340, CP210x o FTDI).
+
+* "Windows protegio tu PC" al abrir:
+    - Clic en "Mas informacion" > "Ejecutar de todas formas".
+    - El .exe no esta firmado con certificado comercial.
+    - En PCs con Smart App Control activo, desactivalo en:
+      Seguridad de Windows > Control de aplicaciones y navegador.
+
+* La app no arranca:
+    - Ver log en %LOCALAPPDATA%\SetraCARDS\setra-cards-startup.log
+    - Y %LOCALAPPDATA%\SETRA\SetraCARDS\setra-cards.log
+
+SOPORTE
+-------
+Tomas Echeverri - SETRA Holdings
