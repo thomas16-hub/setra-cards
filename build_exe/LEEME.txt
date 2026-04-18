@@ -15,7 +15,8 @@ INSTALACION
 -----------
 1. Descomprime toda la carpeta "Setra-CARDS" en cualquier lugar.
 2. Conecta el encoder USB al PC.
-3. Doble-clic en "Instalar.bat".
+3. Click derecho en "Instalar.bat" > Ejecutar como administrador.
+   (El instalador pedira permisos para instalar el driver del encoder.)
 4. Elige el hotel con la tecla 1-7:
       [1] Caney Turbo          [5] Ruisenor Itagui
       [2] Confort Turbo        [6] Torre Primavera Laureles
@@ -62,8 +63,9 @@ PROBLEMAS FRECUENTES
     - Revisa que el cable USB este conectado.
     - Administracion > Encoder > Detectar automaticamente.
     - Si no aparece, activa "Mostrar todos los puertos".
-    - Verifica driver USB-Serial en Administrador de dispositivos
-      (suele ser CH340, CP210x o FTDI).
+    - El driver CP210x se instala automaticamente con el instalador.
+      Si falla, instalarlo manualmente ejecutando el .inf en:
+      drivers\CP210x\silabser.inf  (click derecho > Instalar)
 
 * "Windows protegio tu PC" al abrir:
     - Clic en "Mas informacion" > "Ejecutar de todas formas".

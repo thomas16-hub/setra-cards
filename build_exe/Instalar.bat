@@ -3,6 +3,14 @@ setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 title Setra CARDS - Instalador
 
+REM --- Auto-elevar a administrador para que pnputil pueda instalar el driver CP210x ---
+net session >nul 2>&1
+if errorlevel 1 (
+    echo Solicitando permisos de administrador...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
+
 echo.
 echo ============================================
 echo   SETRA CARDS v2 - Instalador
@@ -57,19 +65,19 @@ choice /C SN /M "Confirmar instalacion (S/N)"
 if errorlevel 2 exit /b 0
 
 echo.
-echo [1/5] Copiando archivos...
+echo [1/6] Copiando archivos...
 if exist "%INSTALL_DIR%" (
     taskkill /F /IM "%EXE_NAME%" >nul 2>&1
     timeout /t 2 /nobreak >nul
 )
-robocopy "%SCRIPT_DIR%." "%INSTALL_DIR%" /E /NFL /NDL /NJH /NJS /NP /XD hoteles /XF Instalar.bat Desinstalar.bat LEEME.txt >nul
+robocopy "%SCRIPT_DIR%." "%INSTALL_DIR%" /E /NFL /NDL /NJH /NJS /NP /XD hoteles drivers /XF Instalar.bat Desinstalar.bat LEEME.txt >nul
 if errorlevel 8 (
     echo ERROR copiando archivos.
     pause
     exit /b 1
 )
 
-echo [2/5] Configurando hotel %HOTEL_NAME%...
+echo [2/6] Configurando hotel %HOTEL_NAME%...
 copy /Y "%SCRIPT_DIR%hoteles\%HOTEL_SLUG%.json" "%INSTALL_DIR%\hotel.json" >nul
 if errorlevel 1 (
     echo ERROR copiando hotel.json.
@@ -77,7 +85,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/5] Creando acceso directo en el Escritorio...
+echo [3/6] Instalando driver del encoder (CP210x)...
+if exist "%SCRIPT_DIR%drivers\CP210x\silabser.inf" (
+    pnputil /add-driver "%SCRIPT_DIR%drivers\CP210x\silabser.inf" /install >nul 2>&1
+    if errorlevel 1 (
+        echo     Advertencia: no se pudo instalar el driver automaticamente.
+        echo     Instalarlo manualmente desde: %SCRIPT_DIR%drivers\CP210x\
+    ) else (
+        echo     Driver CP210x instalado correctamente.
+    )
+) else (
+    echo     Advertencia: drivers\CP210x no encontrado, salteando.
+)
+
+echo [4/6] Creando acceso directo en el Escritorio...
 powershell -NoProfile -Command ^
   "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%DESKTOP_SHORTCUT%');" ^
   "$s.TargetPath = '%INSTALL_DIR%\%EXE_NAME%';" ^
@@ -86,7 +107,7 @@ powershell -NoProfile -Command ^
   "$s.Description = 'Setra CARDS - %HOTEL_NAME%';" ^
   "$s.Save()"
 
-echo [4/5] Configurando arranque automatico...
+echo [5/6] Configurando arranque automatico...
 powershell -NoProfile -Command ^
   "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%STARTUP_SHORTCUT%');" ^
   "$s.TargetPath = '%INSTALL_DIR%\%EXE_NAME%';" ^
@@ -94,7 +115,7 @@ powershell -NoProfile -Command ^
   "$s.IconLocation = '%INSTALL_DIR%\%EXE_NAME%,0';" ^
   "$s.Save()"
 
-echo [5/5] Registrando instalacion...
+echo [6/6] Registrando instalacion...
 > "%INSTALL_DIR%\.installed" echo hotel=%HOTEL_SLUG%
 >> "%INSTALL_DIR%\.installed" echo fecha=%DATE% %TIME%
 

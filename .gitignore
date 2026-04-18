@@ -29,6 +29,7 @@ desktop.ini
 # Flet
 .flet/
 build_exe/flet_client/
+build_exe/drivers/
 
 # Tests & coverage
 .pytest_cache/

@@ -33,6 +33,16 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile build_exe/flet_client/flet-windows.zip
           Write-Host "Flet client v$ver descargado"
 
+      - name: Download CP210x USB driver (Silicon Labs VCP)
+        shell: pwsh
+        run: |
+          $url = "https://www.silabs.com/documents/public/software/CP210x_Universal_Windows_Driver.zip"
+          New-Item -ItemType Directory -Force -Path build_exe/drivers | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile build_exe/drivers/CP210x.zip
+          Expand-Archive -Path build_exe/drivers/CP210x.zip -DestinationPath build_exe/drivers/CP210x -Force
+          Remove-Item build_exe/drivers/CP210x.zip
+          Write-Host "Driver CP210x preparado"
+
       - name: Build with PyInstaller
         run: pyinstaller build_exe/setra-cards.spec --noconfirm --clean
 
@@ -45,6 +55,7 @@ jobs:
           Copy-Item "build_exe/Desinstalar.bat" $stage
           Copy-Item "build_exe/LEEME.txt" $stage
           Copy-Item -Recurse "hoteles" "$stage/hoteles"
+          Copy-Item -Recurse "build_exe/drivers" "$stage/drivers"
           Compress-Archive -Path $stage -DestinationPath "dist/setra-cards-$env:GITHUB_REF_NAME.zip" -Force
 
       - name: Compute SHA-256
