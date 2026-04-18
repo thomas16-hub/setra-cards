@@ -1,10 +1,11 @@
 [project]
 name = "setra-cards"
-version = "2.0.0"
+version = "2.0.1"
 description = "Setra CARDS — Programacion de tarjetas Locstar (app nativa Flet)"
 requires-python = ">=3.11"
 dependencies = [
     "flet>=0.28.3,<1.0",
+    "flet-desktop>=0.28.3,<1.0",
     "pyserial>=3.5,<4.0",
     "pycryptodome>=3.21,<4.0",
     "sqlalchemy>=2.0,<3.0",

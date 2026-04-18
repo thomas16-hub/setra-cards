@@ -26,9 +26,24 @@ from setra_cards.ui.components import (
     show_toast,
 )
 from setra_cards.ui.components.basics import confirm_dialog
+from setra_cards.ui.components.basics import _page_open, _page_close
 
 
 def build(page: ft.Page) -> ft.Control:
+    from setra_cards.services.auth import role_has_access
+    state = get_state()
+    if not role_has_access(state.operator.role if state.operator else None, "manager"):
+        return ft.Container(
+            content=ft.Column([
+                ft.Icon(ft.Icons.LOCK_OUTLINED, size=48, color=theme.TEXT_MUTED),
+                ft.Text("Acceso restringido", size=18, weight=ft.FontWeight.W_600, color=theme.TEXT),
+                ft.Text("Se requiere rol Manager o superior.", size=13, color=theme.TEXT_MUTED),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+               alignment=ft.MainAxisAlignment.CENTER, spacing=12),
+            alignment=ft.Alignment.CENTER,
+            expand=True,
+        )
+
     header = PageHeader(title="Administracion", subtitle="Configuracion y mantenimiento")
 
     return ft.Container(
@@ -238,11 +253,11 @@ def _operators_section(page: ft.Page) -> ft.Control:
 def _op_row(page: ft.Page, op: Operator, on_change) -> ft.Control:
     state = get_state()
     role_colors = {
-        "super_manager": (theme.ERROR, "#FEE4E2"),
-        "manager": (theme.WARNING, "#FFF4D6"),
-        "frontdesk": (theme.ACCENT, "#E8F2FF"),
+        "super_manager": (theme.GOLD_LIGHT, theme.GOLD_BG),
+        "manager":       (theme.INFO,       theme.SURFACE_ELEVATED),
+        "frontdesk":     (theme.TEXT_MUTED, theme.SURFACE_ALT),
     }
-    fg, bg = role_colors.get(op.role, (theme.TEXT_MUTED, "#F0F0F0"))
+    fg, bg = role_colors.get(op.role, (theme.TEXT_MUTED, theme.SURFACE_ALT))
 
     def on_edit(e: ft.ControlEvent) -> None:
         _open_operator_dialog(page, state, op, on_change)
@@ -260,8 +275,8 @@ def _op_row(page: ft.Page, op: Operator, on_change) -> ft.Control:
                         ft.Row([
                             ft.Text(op.name, size=13, weight=ft.FontWeight.W_600, color=theme.TEXT),
                             Badge(op.role.replace("_", " ").title(), fg, bg),
-                            Badge("Activo", theme.SUCCESS, "#E8F7EC") if op.active
-                            else Badge("Inactivo", theme.TEXT_MUTED, "#F0F0F0"),
+                            Badge("Activo", theme.SUCCESS, theme.SURFACE_ALT) if op.active
+                            else Badge("Inactivo", theme.TEXT_MUTED, theme.SURFACE_ALT),
                         ], spacing=6),
                         ft.Text(
                             "Debe cambiar PIN al iniciar sesion" if op.must_change_pin else "PIN configurado",
@@ -288,19 +303,29 @@ def _op_row(page: ft.Page, op: Operator, on_change) -> ft.Control:
 
 
 def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) -> None:
+    from setra_cards.services.auth import role_has_access
     sf = init_db()
     is_new = op is None
+    op_role = state.operator.role if state.operator else None
+    is_super = role_has_access(op_role, "super_manager")
+
+    # Manager NO puede editar super_managers ni crearlos
+    if op and op.role == "super_manager" and not is_super:
+        show_toast(page, "Solo super_manager puede editar a un super_manager", "error")
+        return
 
     name = ft.TextField(label="Nombre del operador", value=op.name if op else "", autofocus=is_new,
                         border_radius=theme.INPUT_RADIUS, disabled=not is_new)
+    role_options = [
+        ft.dropdown.Option("frontdesk", "Frontdesk (recepcion)"),
+        ft.dropdown.Option("manager", "Manager"),
+    ]
+    if is_super:
+        role_options.append(ft.dropdown.Option("super_manager", "Super manager (admin)"))
     role = ft.Dropdown(
         label="Rol",
         value=op.role if op else "frontdesk",
-        options=[
-            ft.dropdown.Option("frontdesk", "Frontdesk (recepcion)"),
-            ft.dropdown.Option("manager", "Manager"),
-            ft.dropdown.Option("super_manager", "Super manager (admin)"),
-        ],
+        options=role_options,
         border_radius=theme.INPUT_RADIUS,
     )
     pin = ft.TextField(
@@ -312,7 +337,7 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
     active = ft.Switch(label="Activo", value=(op.active if op else True), active_color=theme.PRIMARY)
 
     def on_close(e: ft.ControlEvent | None = None) -> None:
-        page.close(dlg)
+        _page_close(page, dlg)
 
     def on_save(e: ft.ControlEvent) -> None:
         with sf() as s:
@@ -346,10 +371,14 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
                     s.commit()
                     log_action(s, "operator_update", state.operator.name if state.operator else "?", existing.name)
                     show_toast(page, "Operador actualizado", "success")
-            except ValueError as exc:
-                show_toast(page, str(exc), "error")
+            except (ValueError, Exception) as exc:
+                from sqlalchemy.exc import IntegrityError
+                if isinstance(exc, IntegrityError):
+                    show_toast(page, "Ya existe un operador con ese nombre", "error")
+                else:
+                    show_toast(page, str(exc), "error")
                 return
-        page.close(dlg)
+        _page_close(page, dlg)
         on_done()
 
     def on_delete(e: ft.ControlEvent) -> None:
@@ -367,7 +396,7 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
                     s.commit()
                     log_action(s, "operator_delete", state.operator.name if state.operator else "?", op.name)
             show_toast(page, f"Operador '{op.name}' eliminado", "info")
-            page.close(dlg)
+            _page_close(page, dlg)
             on_done()
 
         confirm_dialog(
@@ -377,7 +406,7 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
         )
 
     actions: list[ft.Control] = [ft.TextButton(content=ft.Text("Cancelar"), on_click=on_close)]
-    if not is_new:
+    if not is_new and is_super:
         actions.append(ft.TextButton(content=ft.Text("Eliminar", color=theme.ERROR), on_click=on_delete))
     actions.append(PrimaryButton("Guardar" if not is_new else "Crear", on_click=on_save))
 
@@ -393,7 +422,7 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
         actions_alignment=ft.MainAxisAlignment.END,
         shape=ft.RoundedRectangleBorder(radius=theme.CARD_RADIUS),
     )
-    page.open(dlg)
+    _page_open(page, dlg)
 
 
 # --- Backup ---

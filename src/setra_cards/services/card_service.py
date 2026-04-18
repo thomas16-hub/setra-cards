@@ -16,6 +16,7 @@ from setra_cards.cards.builder import (
     build_auth_card,
     build_clock_card,
     build_guest_card,
+    build_laundry_card,
     build_master_card,
     build_setting_card,
 )
@@ -23,16 +24,18 @@ from setra_cards.cards.reader import read_card
 from setra_cards.cards.writer import blank_card, write_card
 from setra_cards.core.app_state import HotelConfig
 from setra_cards.encoder.driver import EncoderDriver
+from setra_cards.encoder.protocol import (
+    CARD_TYPE_AUTH,
+    CARD_TYPE_CLOCK,
+    CARD_TYPE_GUEST,
+    CARD_TYPE_LAUNDRY,
+    CARD_TYPE_MASTER,
+    CARD_TYPE_SETTING,
+)
 from setra_cards.services.action_log import log as log_action
 from setra_cards.storage.models import CardLog, Guest, Room
 
 logger = logging.getLogger(__name__)
-
-CARD_TYPE_GUEST = 0x00
-CARD_TYPE_MASTER = 0x10
-CARD_TYPE_AUTH = 0xC0
-CARD_TYPE_CLOCK = 0x20
-CARD_TYPE_SETTING = 0x40
 
 
 @dataclass(frozen=True)
@@ -125,7 +128,8 @@ def create_guest_card(
         logger.exception("Error construyendo guest card")
         return CardResult(False, "Guest", error=f"Error interno: {exc}")
 
-    result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key)
+    result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key,
+                        building=room.building)
     uid_hex = result.uid.hex(":") if result.uid else None
 
     if not result.success:
@@ -160,6 +164,8 @@ def create_master_card(
     valid_until: datetime, operator: str,
 ) -> CardResult:
     now = datetime.now()
+    if valid_until <= now:
+        return CardResult(False, "Master", error="La fecha de vencimiento debe ser futura")
     try:
         card_data = build_master_card(now=now, expire=valid_until, sig=hotel.signature)
     except Exception as exc:
@@ -226,7 +232,8 @@ def create_setting_card(
         )
     except Exception as exc:
         return CardResult(False, "Setting", error=f"Error interno: {exc}")
-    result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key)
+    result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key,
+                        building=room.building)
     uid_hex = result.uid.hex(":") if result.uid else None
     _log_emission(
         session, "Setting", CARD_TYPE_SETTING, uid_hex, result.success, operator,
@@ -239,6 +246,66 @@ def create_setting_card(
             message=f"Setting card para hab. {room.display_number}",
         )
     return CardResult(False, "Setting", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+
+def create_laundry_card(
+    *,
+    encoder: EncoderDriver,
+    hotel: HotelConfig,
+    session: Session,
+    hours: int = 8,
+    operator: str,
+    staff_name: str | None = None,
+    assigned_rooms: list[str] | None = None,
+) -> CardResult:
+    """Tarjeta de limpieza valida por N horas.
+
+    El protocolo Locstar graba room=0x00 (acceso global a todo el hotel).
+    No es posible restringir a habitaciones específicas a nivel de firmware.
+    Las habitaciones asignadas al staff se registran en el audit log para
+    trazabilidad aunque físicamente la tarjeta abra todas.
+    """
+    from datetime import timedelta
+    now = datetime.now()
+    expire = now + timedelta(hours=hours)
+    try:
+        card_data = build_laundry_card(
+            now=now,
+            expire=expire,
+            sig=hotel.signature,
+        )
+    except Exception as exc:
+        return CardResult(False, "Limpieza", error=f"Error interno: {exc}")
+
+    result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key)
+    uid_hex = result.uid.hex(":") if result.uid else None
+
+    if assigned_rooms:
+        rooms_str = ", ".join(assigned_rooms[:10]) + ("..." if len(assigned_rooms) > 10 else "")
+        assigned_desc = f" [Hab. asignadas: {rooms_str}]"
+    else:
+        assigned_desc = ""
+
+    # error_message solo se llena cuando hay fallo real; el assigned_desc
+    # es metadata de auditoría y va en la detail del action_log, no en error_message
+    error_msg = result.error if not result.success else None
+    _log_emission(
+        session, "Laundry", CARD_TYPE_LAUNDRY, uid_hex, result.success, operator,
+        expires_at=expire,
+        error=error_msg,
+    )
+    if result.success:
+        staff_info = f" para {staff_name}" if staff_name else ""
+        detail = f"Tarjeta limpieza{staff_info} — {hours}h, hasta {expire.strftime('%H:%M')}{assigned_desc}"
+        log_action(session, "card_laundry", operator, detail)
+        msg_extra = ""
+        if assigned_rooms:
+            msg_extra = f" · {len(assigned_rooms)} hab. asignadas a {staff_name or 'limpiador'}"
+        return CardResult(
+            True, "Limpieza", uid_hex=uid_hex,
+            message=f"Tarjeta limpieza emitida — válida {hours}h (hasta {expire.strftime('%d/%m %H:%M')}){msg_extra}",
+        )
+    return CardResult(False, "Limpieza", uid_hex=uid_hex, error=result.error or "Error al escribir")
 
 
 def blank_existing_card(
@@ -256,7 +323,7 @@ def blank_existing_card(
 def read_existing_card(
     *, encoder: EncoderDriver, hotel: HotelConfig,
 ) -> tuple[bool, str, dict]:
-    decoded = read_card(encoder, hotel.sector, hotel.signature)
+    decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
     if not decoded:
         return False, "No se pudo leer la tarjeta — coloquela en el encoder", {}
     info = {

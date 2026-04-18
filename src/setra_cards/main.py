@@ -34,10 +34,20 @@ def build_app(page: ft.Page) -> None:
     page.window.height = 820
     page.window.min_width = 960
     page.window.min_height = 640
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.theme_mode = ft.ThemeMode.DARK
     page.padding = 0
     page.bgcolor = theme.BG
-    page.fonts = {}  # usar fuentes del sistema; Flet provee su propia Roboto
+    page.theme = ft.Theme(
+        color_scheme=ft.ColorScheme(
+            primary=theme.GOLD,
+            on_primary=theme.TEXT_INVERSE,
+            secondary=theme.GOLD_LIGHT,
+            surface=theme.SURFACE,
+            on_surface=theme.TEXT,
+            error=theme.ERROR,
+        ),
+    )
+    page.fonts = {}
 
     page.add(login_build(page))
 

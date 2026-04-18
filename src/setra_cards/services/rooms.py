@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from setra_cards.storage.models import Room
@@ -28,6 +29,11 @@ def _next_sequential_id(session: Session) -> int:
     return (result or 0) + 1
 
 
+def _validate_byte_field(value: int, name: str) -> None:
+    if not (0 <= value <= 255):
+        raise ValueError(f"{name} debe estar entre 0 y 255")
+
+
 def create_room(
     session: Session,
     display_number: str,
@@ -39,22 +45,33 @@ def create_room(
     display = display_number.strip()
     if not display:
         raise ValueError("Numero de habitacion requerido")
+    _validate_byte_field(building, "Edificio")
+    _validate_byte_field(floor, "Piso")
     if state not in VALID_STATES:
         raise ValueError(f"Estado invalido: {state}")
     if get_by_display(session, display):
         raise ValueError(f"Ya existe habitacion {display}")
-    r = Room(
-        sequential_id=_next_sequential_id(session),
-        display_number=display,
-        building=building,
-        floor=floor,
-        state=state,
-        notes=notes,
-    )
-    session.add(r)
-    session.commit()
-    session.refresh(r)
-    return r
+    # Retry en caso de race en sequential_id (UNIQUE constraint)
+    last_exc: Exception | None = None
+    for _ in range(3):
+        r = Room(
+            sequential_id=_next_sequential_id(session),
+            display_number=display,
+            building=building,
+            floor=floor,
+            state=state,
+            notes=notes,
+        )
+        session.add(r)
+        try:
+            session.commit()
+            session.refresh(r)
+            return r
+        except IntegrityError as exc:
+            session.rollback()
+            last_exc = exc
+            continue
+    raise ValueError(f"No se pudo crear la habitacion (conflicto de ID): {last_exc}")
 
 
 def update_room(
@@ -72,13 +89,17 @@ def update_room(
         raise ValueError("Habitacion no existe")
     if display_number is not None:
         new_display = display_number.strip()
+        if not new_display:
+            raise ValueError("Numero de habitacion no puede estar vacio")
         if new_display != r.display_number:
             if get_by_display(session, new_display):
                 raise ValueError(f"Ya existe habitacion {new_display}")
             r.display_number = new_display
     if building is not None:
+        _validate_byte_field(building, "Edificio")
         r.building = building
     if floor is not None:
+        _validate_byte_field(floor, "Piso")
         r.floor = floor
     if state is not None:
         if state not in VALID_STATES:

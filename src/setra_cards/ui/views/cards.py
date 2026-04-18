@@ -22,6 +22,8 @@ from setra_cards.core.app_state import get_state
 from setra_cards.services import card_service
 from setra_cards.services import rooms as rooms_service
 from setra_cards.services import guests as guests_service
+from setra_cards.services import staff as staff_service
+from setra_cards.services.auth import role_has_access
 from setra_cards.storage.database import init_db
 from setra_cards.ui import theme
 from setra_cards.ui.components import (
@@ -33,20 +35,28 @@ from setra_cards.ui.components import (
     show_toast,
 )
 
+# (key, label, icon, descripcion, min_role). min_role=None → todos los roles
 CARD_KINDS = [
-    ("guest", "Huesped", ft.Icons.BADGE_OUTLINED, "Abre una habitacion hasta el checkout"),
-    ("master", "Maestra", ft.Icons.KEY, "Abre todas las habitaciones"),
-    ("auth", "Autorizacion", ft.Icons.VERIFIED, "Programar cerraduras nuevas"),
-    ("clock", "Reloj", ft.Icons.SCHEDULE, "Sincroniza hora en las cerraduras"),
-    ("setting", "Setting", ft.Icons.SETTINGS_INPUT_COMPONENT, "Asigna numero a una cerradura"),
-    ("blank", "Borrar", ft.Icons.DELETE_SWEEP_OUTLINED, "Borra una tarjeta existente"),
-    ("read", "Leer", ft.Icons.SEARCH, "Diagnostico de una tarjeta"),
+    ("guest",    "Huesped",      ft.Icons.BADGE_OUTLINED,             "Abre una habitacion hasta el checkout",   None),
+    ("laundry",  "Limpieza",     ft.Icons.CLEANING_SERVICES_OUTLINED, "Acceso para personal de limpieza por horas", None),
+    ("master",   "Maestra",      ft.Icons.KEY,                        "Abre todas las habitaciones",             "manager"),
+    ("auth",     "Autorizacion", ft.Icons.VERIFIED,                   "Programar cerraduras nuevas",             "manager"),
+    ("clock",    "Reloj",        ft.Icons.SCHEDULE,                   "Sincroniza hora en las cerraduras",       "manager"),
+    ("setting",  "Setting",      ft.Icons.SETTINGS_INPUT_COMPONENT,   "Asigna numero a una cerradura",           "manager"),
+    ("blank",    "Borrar",       ft.Icons.DELETE_SWEEP_OUTLINED,      "Borra una tarjeta existente",             None),
+    ("read",     "Leer",         ft.Icons.SEARCH,                     "Diagnostico de una tarjeta",              None),
 ]
 
 
 def build(page: ft.Page) -> ft.Control:
     state = get_state()
-    selected = {"kind": "guest"}
+    op_role = state.operator.role if state.operator else None
+    allowed_kinds = [
+        k for k in CARD_KINDS
+        if k[4] is None or role_has_access(op_role, k[4])
+    ]
+    default_kind = allowed_kinds[0][0] if allowed_kinds else "guest"
+    selected = {"kind": default_kind}
     form_host = ft.Container(expand=True)
     result_host = ft.Container()
 
@@ -62,7 +72,7 @@ def build(page: ft.Page) -> ft.Control:
     encoder_banner = _encoder_status_banner(state)
 
     kind_chips = ft.Row(
-        [_kind_chip(k, selected, on_select_kind) for k in CARD_KINDS],
+        [_kind_chip(k, selected, on_select_kind) for k in allowed_kinds],
         wrap=True,
         spacing=8,
         run_spacing=8,
@@ -97,7 +107,8 @@ def _encoder_status_banner(state) -> ft.Control:
     ok = state.encoder is not None
     icon = ft.Icons.USB if ok else ft.Icons.USB_OFF
     fg = theme.SUCCESS if ok else theme.WARNING
-    bg = "#E8F7EC" if ok else "#FFF4D6"
+    bg = theme.SURFACE_ALT
+    border_color = theme.SUCCESS if ok else theme.WARNING
     title = f"Encoder conectado en {state.encoder_port}" if ok else "Encoder no conectado"
     sub = "Coloca la tarjeta en el lector y presiona Grabar" if ok else "Ve a Administracion y presiona 'Detectar automaticamente'"
     return ft.Container(
@@ -117,13 +128,13 @@ def _encoder_status_banner(state) -> ft.Control:
         ),
         padding=ft.Padding(14, 10, 14, 10),
         bgcolor=bg,
-        border=ft.Border.all(1, theme.BORDER),
+        border=ft.Border.all(1, border_color),
         border_radius=10,
     )
 
 
 def _kind_chip(kind_tuple: tuple, selected: dict, on_click_cb) -> ft.Container:
-    key, label, icon, _desc = kind_tuple
+    key, label, icon, _desc = kind_tuple[0], kind_tuple[1], kind_tuple[2], kind_tuple[3]
     is_active = selected["kind"] == key
 
     def on_click(e: ft.ControlEvent) -> None:
@@ -132,9 +143,9 @@ def _kind_chip(kind_tuple: tuple, selected: dict, on_click_cb) -> ft.Container:
     return ft.Container(
         content=ft.Row(
             [
-                ft.Icon(icon, size=16, color=theme.SURFACE if is_active else theme.TEXT_MUTED),
+                ft.Icon(icon, size=16, color=theme.TEXT_INVERSE if is_active else theme.TEXT_MUTED),
                 ft.Text(label, size=13, weight=ft.FontWeight.W_600,
-                        color=theme.SURFACE if is_active else theme.TEXT),
+                        color=theme.TEXT_INVERSE if is_active else theme.TEXT),
             ],
             spacing=6,
             tight=True,
@@ -151,6 +162,8 @@ def _kind_chip(kind_tuple: tuple, selected: dict, on_click_cb) -> ft.Container:
 def _form_for_kind(page: ft.Page, kind: str, result_host: ft.Container) -> ft.Control:
     if kind == "guest":
         return _guest_form(page, result_host)
+    if kind == "laundry":
+        return _laundry_form(page, result_host)
     if kind == "master":
         return _master_form(page, result_host)
     if kind == "setting":
@@ -277,6 +290,210 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     )
 
 
+# --- Form: Limpieza ---
+
+def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
+    """Tarjeta de limpieza con asignación lógica de habitaciones.
+
+    El protocolo Locstar graba room=0x00 (acceso global a TODO el hotel).
+    La tarjeta física SIEMPRE abre todas las habitaciones. La selección de
+    habitaciones asignadas aquí se registra en el audit log para trazabilidad
+    (qué limpiador debía cubrir qué habitaciones), pero NO limita la tarjeta.
+    """
+    state = get_state()
+    sf = init_db()
+    hours_val = {"v": 8}
+
+    with sf() as s:
+        staff_list = [
+            st for st in staff_service.list_staff(s, active_only=True)
+            if st.role == "limpieza"
+        ]
+        staff_info = [
+            {
+                "id": st.id,
+                "name": st.name,
+                "assigned": staff_service.assigned_room_list(st),
+            }
+            for st in staff_list
+        ]
+        all_rooms = rooms_service.list_rooms(s)
+        room_displays = [r.display_number for r in all_rooms]
+
+    selected_staff = {"id": None}
+    selected_rooms: set[str] = set()
+
+    hours_display = ft.Text("8 horas", size=14, color=theme.GOLD_LIGHT, weight=ft.FontWeight.W_600)
+    expires_display = ft.Text(
+        (datetime.now() + timedelta(hours=8)).strftime("%d/%m/%Y %H:%M"),
+        size=12, color=theme.TEXT_MUTED,
+    )
+    rooms_count_text = ft.Text("0 habitaciones seleccionadas", size=12, color=theme.TEXT_MUTED)
+    rooms_grid_host = ft.Container()
+
+    def on_hours_change(e):
+        h = int(float(e.control.value))
+        hours_val["v"] = h
+        hours_display.value = f"{h} hora{'s' if h != 1 else ''}"
+        expires_display.value = (datetime.now() + timedelta(hours=h)).strftime("%d/%m/%Y %H:%M")
+        page.update()
+
+    hours_slider = ft.Slider(
+        min=1, max=24, divisions=23, value=8,
+        active_color=theme.GOLD, thumb_color=theme.GOLD,
+        on_change=on_hours_change,
+    )
+
+    def update_count():
+        n = len(selected_rooms)
+        rooms_count_text.value = f"{n} habitación{'es' if n != 1 else ''} registrada{'s' if n != 1 else ''} en el audit log"
+
+    def render_rooms_grid():
+        chips = []
+        for disp in room_displays:
+            is_sel = disp in selected_rooms
+
+            def make_toggle(d):
+                def toggle(e):
+                    if d in selected_rooms:
+                        selected_rooms.discard(d)
+                    else:
+                        selected_rooms.add(d)
+                    render_rooms_grid()
+                    update_count()
+                    page.update()
+                return toggle
+
+            chips.append(ft.Container(
+                content=ft.Text(disp, size=12, weight=ft.FontWeight.W_600,
+                                color=theme.TEXT_INVERSE if is_sel else theme.TEXT),
+                padding=ft.Padding(10, 6, 10, 6),
+                bgcolor=theme.GOLD if is_sel else theme.SURFACE_ALT,
+                border=ft.Border.all(1, theme.GOLD if is_sel else theme.BORDER),
+                border_radius=8,
+                on_click=make_toggle(disp),
+                ink=True,
+            ))
+        rooms_grid_host.content = ft.Row(chips, wrap=True, spacing=6, run_spacing=6)
+
+    def on_staff_change(e):
+        val = e.control.value
+        if val and val != "0":
+            selected_staff["id"] = int(val)
+            match = next((s for s in staff_info if s["id"] == int(val)), None)
+            if match:
+                selected_rooms.clear()
+                selected_rooms.update(match["assigned"])
+        else:
+            selected_staff["id"] = None
+            selected_rooms.clear()
+        render_rooms_grid()
+        update_count()
+        page.update()
+
+    staff_dd = ft.Dropdown(
+        label="Personal de limpieza (opcional)",
+        options=[ft.dropdown.Option("0", "— Sin asignar staff —")] +
+                [ft.dropdown.Option(str(s["id"]), f"{s['name']} ({len(s['assigned'])} hab.)") for s in staff_info],
+        value="0",
+        border_radius=theme.INPUT_RADIUS,
+    )
+    staff_dd.on_change = on_staff_change
+
+    def select_all(e):
+        selected_rooms.update(room_displays)
+        render_rooms_grid()
+        update_count()
+        page.update()
+
+    def clear_all(e):
+        selected_rooms.clear()
+        render_rooms_grid()
+        update_count()
+        page.update()
+
+    def do_emit(e: ft.ControlEvent) -> None:
+        if not state.encoder:
+            show_toast(page, "Encoder no conectado", "error")
+            return
+        staff_name = None
+        if selected_staff["id"]:
+            match = next((s for s in staff_info if s["id"] == selected_staff["id"]), None)
+            if match:
+                staff_name = match["name"]
+        with sf() as s:
+            result = card_service.create_laundry_card(
+                encoder=state.encoder,
+                hotel=state.hotel,
+                session=s,
+                hours=hours_val["v"],
+                operator=state.operator.name if state.operator else "?",
+                staff_name=staff_name,
+                assigned_rooms=sorted(selected_rooms) if selected_rooms else None,
+            )
+        _show_card_result(result_host, result)
+        page.update()
+
+    render_rooms_grid()
+    update_count()
+
+    return SectionCard(
+        title="Tarjeta de limpieza",
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=theme.WARNING),
+                        ft.Text(
+                            "La tarjeta física SIEMPRE abre todas las habitaciones (protocolo Locstar). "
+                            "Las habitaciones seleccionadas se guardan en el audit log como asignación "
+                            "lógica del limpiador para trazabilidad.",
+                            size=11, color=theme.WARNING,
+                        ),
+                    ], spacing=8),
+                    bgcolor=theme.SURFACE_ALT,
+                    border=ft.Border.all(1, theme.WARNING),
+                    border_radius=8,
+                    padding=ft.Padding(12, 10, 12, 10),
+                ),
+                ft.Container(height=12),
+                staff_dd,
+                ft.Container(height=8),
+                ft.Row([
+                    ft.Text("Habitaciones asignadas (audit log)", size=12,
+                            color=theme.TEXT_MUTED, weight=ft.FontWeight.W_600, expand=True),
+                    SecondaryButton("Todas", on_click=select_all, icon=ft.Icons.DONE_ALL),
+                    SecondaryButton("Limpiar", on_click=clear_all, icon=ft.Icons.CLEAR),
+                ], spacing=6),
+                rooms_count_text,
+                ft.Container(
+                    content=rooms_grid_host,
+                    bgcolor=theme.SURFACE_ALT,
+                    border=ft.Border.all(1, theme.BORDER),
+                    border_radius=8,
+                    padding=ft.Padding(10, 10, 10, 10),
+                ),
+                ft.Container(height=12),
+                ft.Row([
+                    ft.Text("Duración:", size=13, color=theme.TEXT_MUTED),
+                    hours_display,
+                ], spacing=8),
+                hours_slider,
+                ft.Row([
+                    ft.Icon(ft.Icons.SCHEDULE_OUTLINED, size=14, color=theme.TEXT_MUTED),
+                    ft.Text("Vence: ", size=12, color=theme.TEXT_MUTED),
+                    expires_display,
+                ], spacing=4),
+                ft.Container(height=12),
+                PrimaryButton("Emitir tarjeta limpieza", on_click=do_emit,
+                              icon=ft.Icons.CLEANING_SERVICES_OUTLINED),
+            ],
+            spacing=8,
+            tight=True,
+        ),
+    )
+
+
 # --- Form: Maestra ---
 
 def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
@@ -299,6 +516,9 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             exp = datetime.strptime(f"{exp_date.value} {exp_time.value}", "%Y-%m-%d %H:%M")
         except Exception:
             show_toast(page, "Fecha u hora invalida", "error")
+            return
+        if exp <= datetime.now():
+            show_toast(page, "La fecha de vencimiento debe ser futura", "error")
             return
         with sf() as s:
             result = card_service.create_master_card(
@@ -483,7 +703,7 @@ def _show_card_result(host: ft.Container, result) -> None:
                 spacing=12,
             ),
             padding=ft.Padding(16, 14, 16, 14),
-            bgcolor="#E8F7EC",
+            bgcolor=theme.SURFACE_ALT,
             border=ft.Border.all(1, theme.SUCCESS),
             border_radius=10,
             margin=ft.Margin(0, 14, 0, 0),
@@ -506,7 +726,7 @@ def _show_card_result(host: ft.Container, result) -> None:
                 spacing=12,
             ),
             padding=ft.Padding(16, 14, 16, 14),
-            bgcolor="#FEE4E2",
+            bgcolor=theme.SURFACE_ALT,
             border=ft.Border.all(1, theme.ERROR),
             border_radius=10,
             margin=ft.Margin(0, 14, 0, 0),

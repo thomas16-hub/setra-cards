@@ -17,6 +17,7 @@ from setra_cards.ui.components import (
     show_toast,
 )
 from setra_cards.ui.components.basics import confirm_dialog
+from setra_cards.ui.components.basics import _page_open, _page_close
 
 
 def build(page: ft.Page) -> ft.Control:
@@ -103,7 +104,7 @@ def _guest_table(page: ft.Page, guests: list[Guest], on_change) -> ft.Control:
                     )
                 ),
             ],
-            on_select_changed=lambda e: on_edit(e) if e.data == "true" else None,
+            on_select_change=lambda e: on_edit(e) if e.data == "true" else None,
         )
 
     table = ft.DataTable(
@@ -140,7 +141,7 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
                          multiline=True, min_lines=2, max_lines=4, border_radius=theme.INPUT_RADIUS)
 
     def on_close(e: ft.ControlEvent | None = None) -> None:
-        page.close(dlg)
+        _page_close(page, dlg)
 
     def on_save(e: ft.ControlEvent) -> None:
         with sf() as s:
@@ -160,7 +161,7 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
             except ValueError as exc:
                 show_toast(page, str(exc), "error")
                 return
-        page.close(dlg)
+        _page_close(page, dlg)
         on_done()
 
     def on_delete(e: ft.ControlEvent) -> None:
@@ -172,7 +173,7 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
                 guests_service.delete_guest(s, guest.id)
                 log_action(s, "guest_delete", state.operator.name if state.operator else "?", guest.name)
             show_toast(page, f"Huesped '{guest.name}' eliminado", "info")
-            page.close(dlg)
+            _page_close(page, dlg)
             on_done()
 
         confirm_dialog(
@@ -200,4 +201,4 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
         actions_alignment=ft.MainAxisAlignment.END,
         shape=ft.RoundedRectangleBorder(radius=theme.CARD_RADIUS),
     )
-    page.open(dlg)
+    _page_open(page, dlg)

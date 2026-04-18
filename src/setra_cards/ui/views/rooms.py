@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import flet as ft
+from sqlalchemy.exc import IntegrityError
 
 from setra_cards.services import rooms as rooms_service
 from setra_cards.services.action_log import log as log_action
+from setra_cards.services.auth import role_has_access
 from setra_cards.storage.database import init_db
 from setra_cards.storage.models import Room
 from setra_cards.core.app_state import get_state
@@ -20,13 +22,14 @@ from setra_cards.ui.components import (
     show_toast,
 )
 from setra_cards.ui.components.basics import confirm_dialog
+from setra_cards.ui.components.basics import _page_open, _page_close
 
 STATE_LABELS = {
-    "limpia": ("Limpia", theme.SUCCESS, "#E8F7EC"),
-    "sucia": ("Sucia", theme.WARNING, "#FFF2D6"),
-    "inspeccion": ("Inspeccion", theme.ACCENT, "#E8F2FF"),
-    "mantenimiento": ("Mantenimiento", "#8E44AD", "#F2E8F8"),
-    "fuera_de_servicio": ("Fuera de servicio", theme.ERROR, "#FEE4E2"),
+    "limpia":            ("Limpia",           theme.SUCCESS,   theme.SURFACE_ALT),
+    "sucia":             ("Sucia",            theme.WARNING,   theme.SURFACE_ALT),
+    "inspeccion":        ("Inspeccion",       theme.ACCENT,    theme.SURFACE_ALT),
+    "mantenimiento":     ("Mantenimiento",    "#8E44AD",       theme.SURFACE_ALT),
+    "fuera_de_servicio": ("Fuera de servicio",theme.ERROR,     theme.SURFACE_ALT),
 }
 STATE_ORDER = ["limpia", "sucia", "inspeccion", "mantenimiento", "fuera_de_servicio"]
 
@@ -34,6 +37,9 @@ STATE_ORDER = ["limpia", "sucia", "inspeccion", "mantenimiento", "fuera_de_servi
 def build(page: ft.Page) -> ft.Control:
     state = get_state()
     sf = init_db()
+
+    op_role = state.operator.role if state.operator else None
+    can_manage = role_has_access(op_role, "manager")
 
     search_query = {"val": ""}
     state_filter = {"val": "todas"}
@@ -79,12 +85,15 @@ def build(page: ft.Page) -> ft.Control:
     def open_new_room(e: ft.ControlEvent | None = None) -> None:
         _open_room_dialog(page, state, None, refresh)
 
+    header_actions: list[ft.Control] = []
+    if can_manage:
+        header_actions.append(
+            PrimaryButton("Nueva habitacion", on_click=open_new_room, icon=ft.Icons.ADD)
+        )
     header = PageHeader(
         title="Habitaciones",
         subtitle=f"{state.hotel.name}",
-        actions=[
-            PrimaryButton("Nueva habitacion", on_click=open_new_room, icon=ft.Icons.ADD),
-        ],
+        actions=header_actions,
     )
 
     root = ft.Container(
@@ -143,7 +152,7 @@ def _filter_bar(page: ft.Page, state_filter: dict, search_query: dict, on_change
 
         return ft.Container(
             content=ft.Text(label, size=12, weight=ft.FontWeight.W_600,
-                            color=theme.SURFACE if is_active else theme.TEXT),
+                            color=theme.TEXT_INVERSE if is_active else theme.TEXT),
             padding=ft.Padding(14, 8, 14, 8),
             bgcolor=theme.PRIMARY if is_active else theme.SURFACE,
             border=ft.Border.all(1, theme.PRIMARY if is_active else theme.BORDER),
@@ -209,7 +218,10 @@ def _room_card(page: ft.Page, room: Room, on_change) -> ft.Container:
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
                 ft.Container(expand=True),
-                Badge(label, color=fg, bg=bg),
+                ft.Row([
+                    Badge(label, color=fg, bg=bg),
+                    ft.Text(f"#{room.sequential_id}", size=10, color=theme.TEXT_LIGHT),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ],
             spacing=8,
             expand=True,
@@ -225,33 +237,79 @@ def _room_card(page: ft.Page, room: Room, on_change) -> ft.Container:
 
 # --- Modal CRUD ---
 
+def _num_stepper(label: str, initial: int, min_val: int = 1, max_val: int = 255) -> tuple[ft.Container, dict]:
+    """Control numérico con botones - y + para valores enteros."""
+    val = {"v": initial}
+    display_text = ft.Text(str(initial), size=18, weight=ft.FontWeight.W_700,
+                           color=theme.TEXT, text_align=ft.TextAlign.CENTER, width=40)
+
+    def decrement(e=None):
+        if val["v"] > min_val:
+            val["v"] -= 1
+            display_text.value = str(val["v"])
+            display_text.update()
+
+    def increment(e=None):
+        if val["v"] < max_val:
+            val["v"] += 1
+            display_text.value = str(val["v"])
+            display_text.update()
+
+    btn_style = ft.ButtonStyle(
+        shape=ft.CircleBorder(),
+        padding=ft.Padding(0, 0, 0, 0),
+        bgcolor=theme.SURFACE_ALT,
+    )
+    ctrl = ft.Container(
+        content=ft.Column([
+            ft.Text(label, size=11, color=theme.TEXT_MUTED, weight=ft.FontWeight.W_600),
+            ft.Container(height=4),
+            ft.Row([
+                ft.IconButton(ft.Icons.REMOVE, icon_size=18, icon_color=theme.TEXT_MUTED,
+                              on_click=decrement, style=btn_style),
+                display_text,
+                ft.IconButton(ft.Icons.ADD, icon_size=18, icon_color=theme.GOLD,
+                              on_click=increment, style=btn_style),
+            ], spacing=4, alignment=ft.MainAxisAlignment.CENTER, tight=True),
+        ], spacing=0, tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=ft.Padding(12, 10, 12, 10),
+        bgcolor=theme.SURFACE_ALT,
+        border=ft.Border.all(1, theme.BORDER),
+        border_radius=theme.INPUT_RADIUS,
+        expand=True,
+    )
+    return ctrl, val
+
+
 def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
     sf = init_db()
     is_new = room is None
+    op_role = state.operator.role if state.operator else None
+    can_manage = role_has_access(op_role, "manager")
+    readonly = not can_manage
+
+    if is_new and readonly:
+        show_toast(page, "Tu rol no permite crear habitaciones", "error")
+        return
 
     display = ft.TextField(
         label="Numero de habitacion",
         value=room.display_number if room else "",
         autofocus=is_new,
         border_radius=theme.INPUT_RADIUS,
+        disabled=readonly,
     )
-    building = ft.TextField(
-        label="Edificio",
-        value=str(room.building) if room else "1",
-        keyboard_type=ft.KeyboardType.NUMBER,
-        border_radius=theme.INPUT_RADIUS,
-    )
-    floor = ft.TextField(
-        label="Piso",
-        value=str(room.floor) if room else "1",
-        keyboard_type=ft.KeyboardType.NUMBER,
-        border_radius=theme.INPUT_RADIUS,
-    )
+    building_ctrl, building_val = _num_stepper("Edificio", room.building if room else 1)
+    floor_ctrl, floor_val = _num_stepper("Piso", room.floor if room else 1)
+    if readonly:
+        building_ctrl.disabled = True
+        floor_ctrl.disabled = True
     state_dd = ft.Dropdown(
         label="Estado",
         value=room.state if room else "limpia",
         options=[ft.dropdown.Option(k, STATE_LABELS[k][0]) for k in STATE_ORDER],
         border_radius=theme.INPUT_RADIUS,
+        disabled=readonly,
     )
     notes = ft.TextField(
         label="Notas (opcional)",
@@ -260,18 +318,15 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
         min_lines=2,
         max_lines=4,
         border_radius=theme.INPUT_RADIUS,
+        disabled=readonly,
     )
 
     def on_close(e: ft.ControlEvent | None = None) -> None:
-        page.close(dlg)
+        _page_close(page, dlg)
 
     def on_save(e: ft.ControlEvent) -> None:
-        try:
-            b = int(building.value or "1")
-            f = int(floor.value or "1")
-        except ValueError:
-            show_toast(page, "Edificio y piso deben ser numeros", "error")
-            return
+        b = building_val["v"]
+        f = floor_val["v"]
         with sf() as s:
             try:
                 if is_new:
@@ -290,7 +345,7 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
                     rooms_service.update_room(
                         s,
                         room.id,
-                        display_number=display.value,
+                        display_number=display.value or "",
                         building=b,
                         floor=f,
                         state=state_dd.value,
@@ -302,7 +357,11 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
             except ValueError as exc:
                 show_toast(page, str(exc), "error")
                 return
-        page.close(dlg)
+            except IntegrityError as exc:
+                s.rollback()
+                show_toast(page, f"Conflicto al guardar: {exc.orig}", "error")
+                return
+        _page_close(page, dlg)
         on_done()
 
     def on_delete(e: ft.ControlEvent) -> None:
@@ -315,7 +374,7 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
                 log_action(s, "room_delete", state.operator.name if state.operator else "?",
                            f"Hab. {room.display_number}")
             show_toast(page, f"Habitacion {room.display_number} eliminada", "info")
-            page.close(dlg)
+            _page_close(page, dlg)
             on_done()
 
         confirm_dialog(
@@ -327,15 +386,39 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
             danger=True,
         )
 
-    actions: list[ft.Control] = [ft.TextButton(content=ft.Text("Cancelar"), on_click=on_close)]
-    if not is_new:
+    actions: list[ft.Control] = [ft.TextButton(content=ft.Text("Cerrar" if readonly else "Cancelar"), on_click=on_close)]
+    if not is_new and can_manage:
         actions.append(
             ft.TextButton(
                 content=ft.Text("Eliminar", color=theme.ERROR),
                 on_click=on_delete,
             )
         )
-    actions.append(PrimaryButton("Guardar" if not is_new else "Crear", on_click=on_save))
+    if can_manage:
+        actions.append(PrimaryButton("Guardar" if not is_new else "Crear", on_click=on_save))
+
+    form_fields: list[ft.Control] = [
+        display,
+        ft.Row([building_ctrl, floor_ctrl], spacing=12),
+        notes,
+    ]
+    if not is_new:
+        form_fields.insert(0, ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.KEY_OUTLINED, size=14, color=theme.GOLD),
+                ft.Text(
+                    f"ID encoder: {room.sequential_id}",
+                    size=13,
+                    color=theme.GOLD_LIGHT,
+                    weight=ft.FontWeight.W_600,
+                ),
+            ], spacing=6),
+            bgcolor=theme.SURFACE_ALT,
+            border=ft.Border.all(1, theme.BORDER),
+            border_radius=8,
+            padding=ft.Padding(12, 8, 12, 8),
+        ))
+        form_fields.insert(3, state_dd)
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -344,15 +427,14 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
             size=18, weight=ft.FontWeight.W_600, color=theme.TEXT,
         ),
         content=ft.Container(
-            content=ft.Column(
-                [display, ft.Row([building, floor], spacing=12), state_dd, notes],
-                spacing=12,
-                tight=True,
-            ),
-            width=420,
+            content=ft.Column(form_fields, spacing=12, tight=True),
+            width=460,
+            padding=ft.Padding(4, 8, 4, 4),
         ),
         actions=actions,
         actions_alignment=ft.MainAxisAlignment.END,
         shape=ft.RoundedRectangleBorder(radius=theme.CARD_RADIUS),
+        bgcolor=theme.SURFACE,
+        title_text_style=ft.TextStyle(color=theme.TEXT),
     )
-    page.open(dlg)
+    _page_open(page, dlg)

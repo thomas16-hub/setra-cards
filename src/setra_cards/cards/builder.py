@@ -33,9 +33,11 @@ class CardData:
     block46: bytes
     trailer: bytes
 
-    def build_block44(self, uid: bytes) -> bytes:
+    def build_block44(self, uid: bytes, building: int = 1, des_key: bytes | None = None) -> bytes:
         """Build block 44 from card UID (DES-encrypted)."""
-        return make_block44(uid)
+        from setra_cards.encoder.protocol import DES_KEY as _DEFAULT_KEY
+        key = des_key if des_key is not None else _DEFAULT_KEY
+        return make_block44(uid, des_key=key, building=building)
 
 
 def make_date_bytes(dt: datetime) -> bytes:

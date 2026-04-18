@@ -52,6 +52,16 @@ class AppState:
         with self._lock:
             self.operator = None
 
+    def set_encoder(self, enc, port: str) -> None:
+        with self._lock:
+            self.encoder = enc
+            self.encoder_port = port
+
+    def clear_encoder(self) -> None:
+        with self._lock:
+            self.encoder = None
+            self.encoder_port = None
+
     @property
     def is_logged_in(self) -> bool:
         return self.operator is not None

@@ -107,6 +107,13 @@ def _install_root() -> Path:
 
 def apply_update(info: UpdateInfo) -> None:
     """Descarga, extrae y relanza la app con el .exe nuevo."""
+    # Validar SHA-256 disponible ANTES de descargar — fail-fast sin tocar disco
+    if not info.sha256:
+        raise ValueError("El release no incluye SHA-256 — actualización rechazada por seguridad")
+    expected_sha = info.sha256.lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+        raise ValueError(f"SHA-256 inválido en el release: {info.sha256}")
+
     install_dir = _install_root()
     exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else "Setra-CARDS.exe"
 
@@ -118,20 +125,31 @@ def apply_update(info: UpdateInfo) -> None:
     logger.info("Descargando %s -> %s", info.asset_url, zip_path)
     hasher = hashlib.sha256()
     req = urllib.request.Request(info.asset_url, headers={"User-Agent": f"SetraCARDS/{__version__}"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT * 4) as resp, zip_path.open("wb") as f:
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            hasher.update(chunk)
-            f.write(chunk)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT * 4) as resp, zip_path.open("wb") as f:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                f.write(chunk)
 
-    if info.sha256:
         actual = hasher.hexdigest().lower()
-        if actual != info.sha256.lower():
-            raise ValueError(f"SHA-256 no coincide: esperado {info.sha256}, recibido {actual}")
+        if actual != expected_sha:
+            # Borrar payload potencialmente malicioso inmediatamente
+            shutil.rmtree(staging, ignore_errors=True)
+            raise ValueError(f"SHA-256 no coincide: esperado {expected_sha}, recibido {actual}")
+    except ValueError:
+        raise
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
     with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.namelist():
+            member_path = (payload_dir / member).resolve()
+            if not str(member_path).startswith(str(payload_dir.resolve())):
+                raise ValueError(f"ZIP path traversal detectado: {member}")
         zf.extractall(payload_dir)
 
     # Si el ZIP tiene una carpeta unica, aplanar

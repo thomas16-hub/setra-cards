@@ -19,6 +19,20 @@ PBKDF2_ITER = 200_000
 RATE_WINDOW_MIN = 5
 RATE_MAX_FAILS = 5
 
+# Jerarquía de roles — igual que locstar-app original
+ROLES = ("super_manager", "manager", "frontdesk")
+ROLE_LABELS = {
+    "super_manager": "Super Manager",
+    "manager": "Manager",
+    "frontdesk": "Front Desk",
+}
+_ROLE_RANK: dict[str, int] = {"super_manager": 0, "manager": 1, "frontdesk": 2}
+
+
+def role_has_access(operator_role: str | None, minimum_role: str) -> bool:
+    """True si operator_role tiene igual o mayor jerarquía que minimum_role."""
+    return _ROLE_RANK.get(operator_role or "", 99) <= _ROLE_RANK.get(minimum_role, 99)
+
 
 @dataclass(frozen=True)
 class AuthResult:
@@ -49,10 +63,19 @@ def verify_pin(operator: Operator, pin: str) -> bool:
 
 
 def ensure_seed_admin(session: Session) -> Operator:
-    """Crea operador Admin con PIN 1234 si no hay ninguno."""
-    any_op = session.query(Operator).first()
-    if any_op:
-        return any_op
+    """Garantiza la existencia de al menos un super_manager.
+
+    Busca un operador con nombre 'Admin' o con rol 'super_manager'. Si no
+    encuentra ninguno, crea el Admin seed con PIN 1234 y must_change_pin=True.
+    Si ya existe un super_manager con otro nombre, lo devuelve tal cual — no
+    crea un Admin oculto adicional.
+    """
+    admin = session.query(Operator).filter(Operator.name == "Admin").first()
+    if admin:
+        return admin
+    super_op = session.query(Operator).filter(Operator.role == "super_manager").first()
+    if super_op:
+        return super_op
     h, salt = hash_new_pin("1234")
     op = Operator(
         name="Admin",

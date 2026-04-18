@@ -8,6 +8,30 @@ import flet as ft
 from setra_cards.ui import theme
 
 
+def _page_open(page: ft.Page, control: ft.Control) -> None:
+    """Abre un dialogo o snackbar compatible con Flet 0.84 (overlay)."""
+    if isinstance(control, ft.SnackBar):
+        page.snack_bar = control
+        page.snack_bar.open = True
+        page.update()
+    else:
+        if control not in page.overlay:
+            page.overlay.append(control)
+        control.open = True
+        page.update()
+
+
+def _page_close(page: ft.Page, control: ft.Control) -> None:
+    """Cierra un dialogo compatible con Flet 0.84."""
+    if isinstance(control, ft.SnackBar):
+        if page.snack_bar:
+            page.snack_bar.open = False
+            page.update()
+    else:
+        control.open = False
+        page.update()
+
+
 def PageHeader(
     title: str,
     subtitle: str | None = None,
@@ -68,16 +92,16 @@ def PrimaryButton(
     width: int | None = None,
 ) -> ft.FilledButton:
     return ft.FilledButton(
-        content=ft.Text(label, size=14, weight=ft.FontWeight.W_600),
+        content=ft.Text(label, size=14, weight=ft.FontWeight.W_700, color=theme.TEXT_INVERSE),
         icon=icon,
         on_click=on_click,
         disabled=disabled,
         width=width,
         style=ft.ButtonStyle(
-            bgcolor=theme.PRIMARY,
-            color=theme.SURFACE,
+            bgcolor=theme.GOLD,
+            color=theme.TEXT_INVERSE,
             shape=ft.RoundedRectangleBorder(radius=theme.BUTTON_RADIUS),
-            padding=ft.Padding(18, 12, 18, 12),
+            padding=ft.Padding(20, 14, 20, 14),
         ),
     )
 
@@ -105,12 +129,12 @@ def SecondaryButton(
     )
 
 
-def Badge(text: str, color: str = theme.TEXT_MUTED, bg: str = "#F0F0F0") -> ft.Container:
+def Badge(text: str, color: str = theme.GOLD_LIGHT, bg: str = theme.SURFACE_ALT) -> ft.Container:
     return ft.Container(
         content=ft.Text(text, size=11, color=color, weight=ft.FontWeight.W_600),
-        padding=ft.Padding(8, 3, 8, 3),
+        padding=ft.Padding(10, 4, 10, 4),
         bgcolor=bg,
-        border_radius=8,
+        border_radius=theme.BADGE_RADIUS,
     )
 
 
@@ -194,13 +218,13 @@ def EmptyState(
 def show_toast(page: ft.Page, message: str, kind: str = "info") -> None:
     """Toast no intrusivo. kind: info | success | error | warning."""
     colors = {
-        "info": (theme.TEXT, "#EEF2F7"),
-        "success": ("#FFFFFF", theme.SUCCESS),
-        "error": ("#FFFFFF", theme.ERROR),
-        "warning": (theme.TEXT, "#FFF4D6"),
+        "info": (theme.TEXT, theme.SURFACE_ELEVATED),
+        "success": (theme.TEXT_INVERSE, theme.SUCCESS),
+        "error": ("#FFFFFF", theme.ERROR_DARK),
+        "warning": (theme.TEXT_INVERSE, theme.WARNING),
     }
     fg, bg = colors.get(kind, colors["info"])
-    page.open(
+    _page_open(page, 
         ft.SnackBar(
             content=ft.Text(message, color=fg, size=13, weight=ft.FontWeight.W_500),
             bgcolor=bg,
@@ -221,10 +245,10 @@ def confirm_dialog(
 ) -> None:
     """Dialogo modal de confirmacion."""
     def on_close(e: ft.ControlEvent | None = None) -> None:
-        page.close(dlg)
+        _page_close(page, dlg)
 
     def on_ok(e: ft.ControlEvent) -> None:
-        page.close(dlg)
+        _page_close(page, dlg)
         on_confirm()
 
     confirm_btn = (
@@ -244,4 +268,4 @@ def confirm_dialog(
         actions_alignment=ft.MainAxisAlignment.END,
         shape=ft.RoundedRectangleBorder(radius=theme.CARD_RADIUS),
     )
-    page.open(dlg)
+    _page_open(page, dlg)

@@ -19,12 +19,13 @@ from setra_cards.ui.components import (
     show_toast,
 )
 from setra_cards.ui.components.basics import confirm_dialog
+from setra_cards.ui.components.basics import _page_open, _page_close
 
 ROLE_COLORS = {
-    "recepcion": (theme.ACCENT, "#E8F2FF"),
-    "limpieza": (theme.SUCCESS, "#E8F7EC"),
-    "mantenimiento": (theme.WARNING, "#FFF2D6"),
-    "admin": ("#8E44AD", "#F2E8F8"),
+    "recepcion":    (theme.ACCENT,    theme.SURFACE_ALT),
+    "limpieza":     (theme.SUCCESS,   theme.SURFACE_ALT),
+    "mantenimiento":(theme.WARNING,   theme.SURFACE_ALT),
+    "admin":        ("#8E44AD",       theme.SURFACE_ALT),
 }
 
 
@@ -81,7 +82,7 @@ def _staff_grid(page: ft.Page, items: list[Staff], on_change) -> ft.Control:
 
 
 def _staff_card(page: ft.Page, s: Staff, on_change) -> ft.Container:
-    fg, bg = ROLE_COLORS.get(s.role, (theme.TEXT_MUTED, "#F0F0F0"))
+    fg, bg = ROLE_COLORS.get(s.role, (theme.TEXT_MUTED, theme.SURFACE_ALT))
     rooms = staff_service.assigned_room_list(s)
     rooms_label = f"{len(rooms)} habitaciones asignadas" if rooms else "Sin asignaciones"
 
@@ -89,9 +90,9 @@ def _staff_card(page: ft.Page, s: Staff, on_change) -> ft.Container:
         _open_staff_dialog(page, get_state(), s, on_change)
 
     status_chip = (
-        Badge("Activo", theme.SUCCESS, "#E8F7EC")
+        Badge("Activo", theme.SUCCESS, theme.SURFACE_ALT)
         if s.active
-        else Badge("Inactivo", theme.TEXT_MUTED, "#F0F0F0")
+        else Badge("Inactivo", theme.TEXT_MUTED, theme.SURFACE_ALT)
     )
 
     return ft.Container(
@@ -102,7 +103,7 @@ def _staff_card(page: ft.Page, s: Staff, on_change) -> ft.Container:
                         ft.CircleAvatar(
                             content=ft.Text(
                                 s.name[0].upper() if s.name else "?",
-                                size=16, weight=ft.FontWeight.BOLD, color=theme.SURFACE,
+                                size=16, weight=ft.FontWeight.BOLD, color=theme.TEXT_INVERSE,
                             ),
                             bgcolor=theme.PRIMARY,
                             radius=20,
@@ -199,7 +200,7 @@ def _open_staff_dialog(page: ft.Page, state, staff: Staff | None, on_done) -> No
         return [r.display_number for r, chk in zip(all_rooms, room_checks) if chk.value]
 
     def on_close(e: ft.ControlEvent | None = None) -> None:
-        page.close(dlg)
+        _page_close(page, dlg)
 
     def on_save(e: ft.ControlEvent) -> None:
         with sf() as s:
@@ -228,7 +229,7 @@ def _open_staff_dialog(page: ft.Page, state, staff: Staff | None, on_done) -> No
             except ValueError as exc:
                 show_toast(page, str(exc), "error")
                 return
-        page.close(dlg)
+        _page_close(page, dlg)
         on_done()
 
     def on_delete(e: ft.ControlEvent) -> None:
@@ -240,7 +241,7 @@ def _open_staff_dialog(page: ft.Page, state, staff: Staff | None, on_done) -> No
                 staff_service.delete_staff(s, staff.id)
                 log_action(s, "staff_delete", state.operator.name if state.operator else "?", staff.name)
             show_toast(page, f"Empleado '{staff.name}' eliminado", "info")
-            page.close(dlg)
+            _page_close(page, dlg)
             on_done()
 
         confirm_dialog(
@@ -283,4 +284,4 @@ def _open_staff_dialog(page: ft.Page, state, staff: Staff | None, on_done) -> No
         actions_alignment=ft.MainAxisAlignment.END,
         shape=ft.RoundedRectangleBorder(radius=theme.CARD_RADIUS),
     )
-    page.open(dlg)
+    _page_open(page, dlg)

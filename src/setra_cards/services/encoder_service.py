@@ -65,8 +65,7 @@ def connect_port(state: AppState, port: str) -> tuple[bool, str]:
             state.encoder.close()
         except Exception:
             pass
-        state.encoder = None
-        state.encoder_port = None
+        state.clear_encoder()
 
     try:
         enc = EncoderDriver(port)
@@ -76,8 +75,7 @@ def connect_port(state: AppState, port: str) -> tuple[bool, str]:
         logger.warning("No se pudo conectar encoder en %s: %s", port, exc)
         return False, f"No se pudo abrir {port}: {exc}"
 
-    state.encoder = enc
-    state.encoder_port = port
+    state.set_encoder(enc, port)
     logger.info("Encoder conectado en %s", port)
     return True, f"Encoder conectado en {port}"
 
@@ -96,8 +94,7 @@ def disconnect(state: AppState) -> None:
             state.encoder.close()
         except Exception:
             pass
-    state.encoder = None
-    state.encoder_port = None
+    state.clear_encoder()
 
 
 _watchdog_thread: threading.Thread | None = None

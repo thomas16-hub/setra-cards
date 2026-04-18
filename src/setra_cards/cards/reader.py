@@ -52,6 +52,7 @@ def read_card(
     encoder: EncoderDriver,
     sector: int,
     sig: SystemSignature,
+    des_key: bytes | None = None,
 ) -> DecodedCard | None:
     """Read and decode a Locstar card from the given sector."""
     detection = encoder.detect_card()
@@ -93,7 +94,8 @@ def read_card(
         return None
 
     # Decrypt block 44 and verify UID
-    plain = decrypt_block44(b44)
+    from setra_cards.encoder.protocol import DES_KEY as _DEFAULT_KEY
+    plain = decrypt_block44(b44, des_key=des_key if des_key is not None else _DEFAULT_KEY)
     uid_match = plain[:4] == uid
 
     # Decode block 45

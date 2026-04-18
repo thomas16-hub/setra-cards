@@ -18,7 +18,6 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -39,7 +38,7 @@ class Operator(Base):
     role: Mapped[str] = mapped_column(String(20), default="frontdesk")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     must_change_pin: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class Room(Base):
@@ -71,8 +70,8 @@ class Guest(Base):
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     email: Mapped[str | None] = mapped_column(String(200), nullable=True)  # opcional, para futuro
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     cards: Mapped[list["CardLog"]] = relationship(back_populates="guest")
 
@@ -95,7 +94,7 @@ class CardLog(Base):
     room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id"), nullable=True)
     room_display: Mapped[str | None] = mapped_column(String(20), nullable=True)
     uid_hex: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    issued_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    issued_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     valid_from: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     operator: Mapped[str] = mapped_column(String(50), default="admin")
@@ -133,7 +132,7 @@ class ActionLog(Base):
     action: Mapped[str] = mapped_column(String(60))
     operator: Mapped[str] = mapped_column(String(50))
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class LoginAttempt(Base):
@@ -143,7 +142,7 @@ class LoginAttempt(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     operator_name: Mapped[str] = mapped_column(String(50))
-    attempted_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    attempted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class S70EventLog(Base):
@@ -164,7 +163,7 @@ class S70EventLog(Base):
     extra: Mapped[int] = mapped_column(Integer, default=0)
     building: Mapped[int] = mapped_column(Integer, default=0)
     floor: Mapped[int] = mapped_column(Integer, default=0)
-    read_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    read_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class Setting(Base):
@@ -174,4 +173,4 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(60), primary_key=True)
     value: Mapped[str] = mapped_column(String(2000))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

@@ -68,7 +68,7 @@ def build(page: ft.Page) -> ft.Control:
 
         return ft.Container(
             content=ft.Text(label, size=12, weight=ft.FontWeight.W_600,
-                            color=theme.SURFACE if is_active else theme.TEXT),
+                            color=theme.TEXT_INVERSE if is_active else theme.TEXT),
             padding=ft.Padding(14, 8, 14, 8),
             bgcolor=theme.PRIMARY if is_active else theme.SURFACE,
             border=ft.Border.all(1, theme.PRIMARY if is_active else theme.BORDER),

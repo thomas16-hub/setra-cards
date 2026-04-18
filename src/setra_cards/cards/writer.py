@@ -54,6 +54,7 @@ def write_card(
     sig: SystemSignature,
     card: CardData,
     des_key: bytes = DES_KEY,
+    building: int = 1,
 ) -> WriteResult:
     """Write a complete card to MIFARE sector.
 
@@ -65,7 +66,7 @@ def write_card(
         return WriteResult(success=False, error="No card detected")
 
     uid = detection.uid
-    block44 = make_block44(uid, des_key=des_key)
+    block44 = make_block44(uid, des_key=des_key, building=building)
     encoder.halt()
     encoder.beep()
     time.sleep(0.18)  # Let beep complete before MIFARE ops interrupt it
