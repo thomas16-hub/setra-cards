@@ -1,0 +1,1 @@
+"""Locstar encoder serial communication."""

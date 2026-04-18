@@ -1,0 +1,33 @@
+[project]
+name = "setra-cards"
+version = "2.0.0"
+description = "Setra CARDS — Programacion de tarjetas Locstar (app nativa Flet)"
+requires-python = ">=3.11"
+dependencies = [
+    "flet>=0.28.3,<1.0",
+    "pyserial>=3.5,<4.0",
+    "pycryptodome>=3.21,<4.0",
+    "sqlalchemy>=2.0,<3.0",
+    "platformdirs>=4.3,<5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+setra-cards = "setra_cards.main:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

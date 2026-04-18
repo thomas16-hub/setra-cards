@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.spec.bak
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Flet
+.flet/
+
+# Tests & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# Runtime data (nunca versionar — son del PC de cada hotel)
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+setra-cards-startup.log
+setra-cards.log
+.browser-profile/
+
+# Hotel config (secrets — cada instalador trae su hotel.json)
+hotel.json
+
+# PyInstaller
+*.spec.cache
