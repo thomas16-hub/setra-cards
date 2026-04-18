@@ -10,7 +10,21 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 flet_datas = collect_data_files("flet") + collect_data_files("flet_desktop")
 flet_hidden = collect_submodules("flet") + collect_submodules("flet_desktop")
 
-datas = list(flet_datas)
+# Incluir el cliente de Flet (flet-windows.zip) pre-descargado para evitar
+# que la app trate de bajarlo en el primer arranque (falla en PCs con SSL
+# root certs desactualizados). flet_desktop lo detecta automáticamente en
+# get_package_bin_dir() == flet_desktop/app/
+flet_client_zip = ROOT / "build_exe" / "flet_client" / "flet-windows.zip"
+flet_client_data = []
+if flet_client_zip.exists():
+    flet_client_data = [(str(flet_client_zip), "flet_desktop/app")]
+else:
+    raise FileNotFoundError(
+        f"Falta {flet_client_zip}. Descargar desde "
+        f"https://github.com/flet-dev/flet/releases/download/v0.84.0/flet-windows.zip"
+    )
+
+datas = list(flet_datas) + flet_client_data
 
 hiddenimports = list(flet_hidden) + [
     "serial.tools.list_ports",

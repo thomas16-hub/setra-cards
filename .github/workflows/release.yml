@@ -24,6 +24,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
+      - name: Download Flet desktop client (for offline-friendly bundle)
+        shell: pwsh
+        run: |
+          $ver = python -c "import flet_desktop; print(flet_desktop.version.version)"
+          $url = "https://github.com/flet-dev/flet/releases/download/v$ver/flet-windows.zip"
+          New-Item -ItemType Directory -Force -Path build_exe/flet_client | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile build_exe/flet_client/flet-windows.zip
+          Write-Host "Flet client v$ver descargado"
+
       - name: Build with PyInstaller
         run: pyinstaller build_exe/setra-cards.spec --noconfirm --clean
 
