@@ -24,20 +24,15 @@ def _resolve_view(key: str, page: ft.Page) -> ft.Control:
     if key == "dashboard":
         from setra_cards.ui.views.dashboard import build as b
     elif key == "rooms":
-        from setra_cards.ui.views.placeholder import build_placeholder
-        return build_placeholder("Habitaciones", "Proximamente — Dia 3")
+        from setra_cards.ui.views.rooms import build as b
     elif key == "guests":
-        from setra_cards.ui.views.placeholder import build_placeholder
-        return build_placeholder("Huespedes", "Proximamente — Dia 3")
+        from setra_cards.ui.views.guests import build as b
     elif key == "cards":
-        from setra_cards.ui.views.placeholder import build_placeholder
-        return build_placeholder("Emitir tarjeta", "Proximamente — Dia 4")
+        from setra_cards.ui.views.cards import build as b
     elif key == "staff":
-        from setra_cards.ui.views.placeholder import build_placeholder
-        return build_placeholder("Personal", "Proximamente — Dia 5")
+        from setra_cards.ui.views.staff import build as b
     elif key == "activity":
-        from setra_cards.ui.views.placeholder import build_placeholder
-        return build_placeholder("Actividad", "Proximamente — Dia 6")
+        from setra_cards.ui.views.activity import build as b
     elif key == "admin":
         from setra_cards.ui.views.admin import build as b
     else:
