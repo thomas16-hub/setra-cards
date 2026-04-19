@@ -10,6 +10,9 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 flet_datas = collect_data_files("flet") + collect_data_files("flet_desktop")
 flet_hidden = collect_submodules("flet") + collect_submodules("flet_desktop")
 
+# certifi CA bundle (necesario para auto-updater en PCs con root certs viejos)
+certifi_datas = collect_data_files("certifi")
+
 # Incluir el cliente de Flet (flet-windows.zip) pre-descargado para evitar
 # que la app trate de bajarlo en el primer arranque (falla en PCs con SSL
 # root certs desactualizados). flet_desktop lo detecta automáticamente en
@@ -24,13 +27,14 @@ else:
         f"https://github.com/flet-dev/flet/releases/download/v0.84.0/flet-windows.zip"
     )
 
-datas = list(flet_datas) + flet_client_data
+datas = list(flet_datas) + flet_client_data + list(certifi_datas)
 
 hiddenimports = list(flet_hidden) + [
     "serial.tools.list_ports",
     "sqlalchemy.dialects.sqlite",
     "Crypto.Cipher.DES",
     "Crypto.Cipher.AES",
+    "certifi",
 ]
 
 a = Analysis(

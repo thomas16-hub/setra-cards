@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,23 @@ GITHUB_REPO = "thomas16-hub/setra-cards"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 TIMEOUT = 15
 ASSET_NAME_PATTERN = re.compile(r"setra-cards.*\.zip$", re.IGNORECASE)
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """Contexto SSL con CA bundle de certifi como fallback.
+
+    En PCs Windows con root certs desactualizados, urllib falla con
+    CERTIFICATE_VERIFY_FAILED. certifi trae el bundle oficial de Mozilla.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        logger.warning("certifi no disponible, usando contexto SSL por defecto")
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _make_ssl_context()
 
 
 @dataclass(frozen=True)
@@ -76,7 +94,7 @@ def check_for_update() -> CheckResult:
                 "Accept": "application/vnd.github+json",
             },
         )
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=_SSL_CTX) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         tag = str(data.get("tag_name", ""))
@@ -126,7 +144,7 @@ def apply_update(info: UpdateInfo) -> None:
     hasher = hashlib.sha256()
     req = urllib.request.Request(info.asset_url, headers={"User-Agent": f"SetraCARDS/{__version__}"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT * 4) as resp, zip_path.open("wb") as f:
+        with urllib.request.urlopen(req, timeout=TIMEOUT * 4, context=_SSL_CTX) as resp, zip_path.open("wb") as f:
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
