@@ -141,13 +141,16 @@ def build_guest_card(
 
     - Opens the assigned room
     - Valid from now until checkout
+    - Block 45: [00, room, issue_date(5), checkout_date(5), 00, building, floor, 01, 00]
+      (16 bytes — el 0x00 separador entre checkout y building es obligatorio,
+       sin él la cerradura desalinea el parsing y acepta cualquier tarjeta)
     - Block 46: [00*13, 95 B8, checksum]
     """
     block45 = (
         bytes([CARD_TYPE_GUEST, room])
         + make_date_bytes(now)
         + make_date_bytes(checkout)
-        + bytes([building, floor, 0x01, 0x00])
+        + bytes([0x00, building, floor, 0x01, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature
