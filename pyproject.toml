@@ -1,6 +1,6 @@
 [project]
 name = "setra-cards"
-version = "2.0.5"
+version = "2.0.6"
 description = "Setra CARDS — Programacion de tarjetas Locstar (app nativa Flet)"
 requires-python = ">=3.11"
 dependencies = [
