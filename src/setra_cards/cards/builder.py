@@ -103,11 +103,13 @@ def build_setting_card(
     sig: SystemSignature,
     building: int = 1,
     floor: int = 1,
+    room_no_id: int = 1,
 ) -> CardData:
     """Build Setting card (0x80).
 
-    - Assigns room to lock
+    - Assigns room to lock (byte[14] = room_no_id, la cerradura valida por esto)
     - Valid ~2 hours from issue
+    - Block 45 (16 bytes): [80, room, date(5), expire(5), building, floor, room_no_id, 00]
     - Block 46: [00*13, 95 B8, checksum]
     """
     expire = now + timedelta(hours=2)
@@ -115,7 +117,7 @@ def build_setting_card(
         bytes([CARD_TYPE_SETTING, room])
         + make_date_bytes(now)
         + make_date_bytes(expire)
-        + bytes([building, floor, 0x01, 0x00])
+        + bytes([building, floor, room_no_id, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature
@@ -136,19 +138,20 @@ def build_guest_card(
     sig: SystemSignature,
     building: int = 1,
     floor: int = 1,
+    room_no_id: int = 1,
 ) -> CardData:
     """Build Guest card (0x00).
 
-    - Opens the assigned room
+    - Opens the assigned room (byte[14] = room_no_id, la cerradura valida por esto)
     - Valid from now until checkout
-    - Block 45 (16 bytes): [00, room, issue_date(5), checkout_date(5), building, floor, 01, 00]
+    - Block 45 (16 bytes): [00, room, issue(5), checkout(5), building, floor, room_no_id, 00]
     - Block 46: [00*13, 95 B8, checksum]
     """
     block45 = (
         bytes([CARD_TYPE_GUEST, room])
         + make_date_bytes(now)
         + make_date_bytes(checkout)
-        + bytes([building, floor, 0x01, 0x00])
+        + bytes([building, floor, room_no_id, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature
@@ -172,14 +175,13 @@ def build_master_card(
     """Build Master card (0x40).
 
     - Opens ALL rooms in the system
-    - Room byte = 0x00 (all rooms)
-    - Same block structure as Guest
+    - room_no_id = 0x00 (wildcard: abre cualquiera)
     """
     block45 = (
         bytes([CARD_TYPE_MASTER, 0x00])
         + make_date_bytes(now)
         + make_date_bytes(expire)
-        + bytes([building, floor, 0x01, 0x00])
+        + bytes([building, floor, 0x00, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature
@@ -203,14 +205,13 @@ def build_laundry_card(
     """Build Laundry/Housekeeping card (0x20).
 
     - Opens rooms for cleaning staff
-    - Room byte = 0x00 (all rooms)
-    - Same block structure as Guest
+    - room_no_id = 0x00 (wildcard: abre cualquiera del floor/building)
     """
     block45 = (
         bytes([CARD_TYPE_LAUNDRY, 0x00])
         + make_date_bytes(now)
         + make_date_bytes(expire)
-        + bytes([building, floor, 0x01, 0x00])
+        + bytes([building, floor, 0x00, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature

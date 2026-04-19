@@ -123,6 +123,7 @@ def create_guest_card(
             sig=hotel.signature,
             building=room.building,
             floor=room.floor,
+            room_no_id=room.room_no_id,
         )
     except Exception as exc:
         logger.exception("Error construyendo guest card")
@@ -227,6 +228,7 @@ def create_setting_card(
             room=int(room.sequential_id),
             building=room.building,
             floor=room.floor,
+            room_no_id=room.room_no_id,
             now=now,
             sig=hotel.signature,
         )
@@ -332,6 +334,7 @@ def read_existing_card(
         "room": getattr(decoded, "room", None),
         "building": getattr(decoded, "building", None),
         "floor": getattr(decoded, "floor", None),
+        "room_no_id": getattr(decoded, "room_no_id", None),
         "valid_from": getattr(decoded, "valid_from", None),
         "valid_until": getattr(decoded, "valid_until", None),
     }

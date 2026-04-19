@@ -29,6 +29,20 @@ def _next_sequential_id(session: Session) -> int:
     return (result or 0) + 1
 
 
+def _next_room_no_id(session: Session, building: int, floor: int) -> int:
+    """Siguiente room_no_id libre dentro del (building, floor).
+
+    La cerradura valida por esta terna, por eso se reinicia por piso.
+    """
+    result = session.execute(
+        select(func.max(Room.room_no_id)).where(
+            Room.building == building,
+            Room.floor == floor,
+        )
+    ).scalar()
+    return (result or 0) + 1
+
+
 def _validate_byte_field(value: int, name: str) -> None:
     if not (0 <= value <= 255):
         raise ValueError(f"{name} debe estar entre 0 y 255")
@@ -59,6 +73,7 @@ def create_room(
             display_number=display,
             building=building,
             floor=floor,
+            room_no_id=_next_room_no_id(session, building, floor),
             state=state,
             notes=notes,
         )
@@ -95,12 +110,21 @@ def update_room(
             if get_by_display(session, new_display):
                 raise ValueError(f"Ya existe habitacion {new_display}")
             r.display_number = new_display
+    building_changed = False
+    floor_changed = False
     if building is not None:
         _validate_byte_field(building, "Edificio")
+        if building != r.building:
+            building_changed = True
         r.building = building
     if floor is not None:
         _validate_byte_field(floor, "Piso")
+        if floor != r.floor:
+            floor_changed = True
         r.floor = floor
+    # Si cambió building o floor, recalcular room_no_id (nuevo piso → nueva serie)
+    if building_changed or floor_changed:
+        r.room_no_id = _next_room_no_id(session, r.building, r.floor)
     if state is not None:
         if state not in VALID_STATES:
             raise ValueError(f"Estado invalido: {state}")

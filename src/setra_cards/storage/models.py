@@ -51,6 +51,9 @@ class Room(Base):
     display_number: Mapped[str] = mapped_column(String(20), unique=True)
     building: Mapped[int] = mapped_column(Integer, default=1)
     floor: Mapped[int] = mapped_column(Integer, default=1)
+    # room_no_id: identificador dentro del piso (1-255). La cerradura valida
+    # contra (building, floor, room_no_id) — NO contra sequential_id.
+    room_no_id: Mapped[int] = mapped_column(Integer, default=1)
     state: Mapped[str] = mapped_column(String(30), default="limpia")
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
 

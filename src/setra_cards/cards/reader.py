@@ -31,6 +31,7 @@ class DecodedCard:
     date2: datetime | None
     building: int
     floor: int
+    room_no_id: int
     signature: bytes
     checksum_valid: bool
     uid_match: bool
@@ -105,6 +106,7 @@ def read_card(
     date2 = _decode_date(b45, 7)
     building = b45[12]
     floor = b45[13]
+    room_no_id = b45[14]
 
     # Verify checksum
     expected_xor = xor_checksum(b45, b46[:15])
@@ -124,6 +126,7 @@ def read_card(
         date2=date2,
         building=building,
         floor=floor,
+        room_no_id=room_no_id,
         signature=signature_bytes,
         checksum_valid=checksum_valid,
         uid_match=uid_match,

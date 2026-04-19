@@ -76,6 +76,7 @@ def _run_migrations(engine) -> None:
         ("card_log", "card_type_byte", "INTEGER NOT NULL DEFAULT 0"),
         ("card_log", "room_id", "INTEGER REFERENCES rooms(id)"),
         ("card_log", "guest_id", "INTEGER REFERENCES guests(id)"),
+        ("rooms", "room_no_id", "INTEGER NOT NULL DEFAULT 1"),
     ]
     with engine.connect() as conn:
         for table, column, col_def in migrations:
@@ -91,6 +92,32 @@ def _run_migrations(engine) -> None:
                     "Migration ALTER TABLE %s ADD COLUMN %s failed: %s",
                     table, column, exc,
                 )
+        # Backfill room_no_id para habitaciones creadas antes de esta columna:
+        # asigna 1, 2, 3... dentro de cada (building, floor), ordenando por id.
+        try:
+            conn.execute(text("""
+                UPDATE rooms
+                SET room_no_id = (
+                    SELECT COUNT(*) FROM rooms r2
+                    WHERE r2.building = rooms.building
+                      AND r2.floor = rooms.floor
+                      AND r2.id <= rooms.id
+                )
+                WHERE room_no_id = 1
+                  AND id IN (
+                    SELECT id FROM rooms r3
+                    WHERE EXISTS (
+                        SELECT 1 FROM rooms r4
+                        WHERE r4.building = r3.building
+                          AND r4.floor = r3.floor
+                          AND r4.id < r3.id
+                    )
+                  )
+            """))
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            logger.warning("Backfill room_no_id falló: %s", exc)
 
 
 def get_session() -> Session:
