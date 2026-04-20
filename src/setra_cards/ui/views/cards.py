@@ -45,6 +45,7 @@ CARD_KINDS = [
     ("setting",  "Setting",      ft.Icons.SETTINGS_INPUT_COMPONENT,   "Asigna numero a una cerradura",           "manager"),
     ("blank",    "Borrar",       ft.Icons.DELETE_SWEEP_OUTLINED,      "Borra una tarjeta existente",             None),
     ("read",     "Leer",         ft.Icons.SEARCH,                     "Diagnostico de una tarjeta",              None),
+    ("s70",      "S70 Audit",    ft.Icons.HISTORY_EDU_OUTLINED,       "Lee eventos de apertura de una cerradura", "manager"),
 ]
 
 
@@ -174,6 +175,8 @@ def _form_for_kind(page: ft.Page, kind: str, result_host: ft.Container) -> ft.Co
         return _instant_form(page, result_host, "blank")
     if kind == "read":
         return _read_form(page, result_host)
+    if kind == "s70":
+        return _s70_form(page, result_host)
     return ft.Container()
 
 
@@ -672,6 +675,124 @@ def _read_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 ),
             ],
             spacing=10,
+        ),
+    )
+
+
+# --- Form: S70 Audit Trail ---
+
+def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
+    state = get_state()
+    sf = init_db()
+
+    header_info = ft.Column([], spacing=2, tight=True)
+    events_list = ft.Column([], spacing=4, tight=True, scroll=ft.ScrollMode.AUTO)
+    events_host = ft.Container(
+        content=events_list,
+        padding=ft.Padding(0, 8, 0, 0),
+    )
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        if not state.encoder:
+            show_toast(page, "Encoder no conectado", "error")
+            return
+        op_name = state.operator.name if state.operator else "?"
+        with sf() as s:
+            ok, msg, info = card_service.read_s70_data_card(
+                encoder=state.encoder,
+                hotel=state.hotel,
+                session=s,
+                operator=op_name,
+            )
+        if not ok:
+            show_toast(page, msg, "error")
+            header_info.controls = [ft.Text(msg, size=12, color=theme.ERROR)]
+            events_list.controls = []
+            page.update()
+            return
+
+        # Header
+        header_info.controls = [
+            ft.Row([
+                ft.Icon(ft.Icons.HISTORY_EDU_OUTLINED, size=16, color=theme.GOLD),
+                ft.Text(f"S70 UID: {info['s70_uid']}", size=13,
+                        weight=ft.FontWeight.W_600, color=theme.TEXT),
+            ], spacing=6),
+            ft.Text(
+                f"Edificio {info['building']} · Piso {info['floor']} · "
+                f"{len(info['events'])} eventos ({info['new_count']} nuevos) · "
+                f"Sectores leidos: {info['sectors_read']}",
+                size=11, color=theme.TEXT_MUTED,
+            ),
+        ]
+
+        # Events
+        if not info["events"]:
+            events_list.controls = [
+                ft.Text("Sin eventos en la tarjeta.", size=12, color=theme.TEXT_MUTED)
+            ]
+        else:
+            rows = []
+            for ev in info["events"]:
+                badge_color = theme.SUCCESS if ev["event_type"] == 0 else theme.WARNING
+                lines: list[ft.Control] = [
+                    ft.Row([
+                        ft.Icon(ft.Icons.DOOR_FRONT_DOOR_OUTLINED, size=14, color=badge_color),
+                        ft.Text(ev["timestamp"], size=12, weight=ft.FontWeight.W_600,
+                                color=theme.TEXT),
+                        ft.Text(ev["event_type_name"], size=11, color=theme.TEXT_MUTED),
+                    ], spacing=8),
+                ]
+                detail_bits = []
+                if ev.get("guest_name"):
+                    detail_bits.append(f"Huesped: {ev['guest_name']}")
+                if ev.get("room_display"):
+                    detail_bits.append(f"Hab. {ev['room_display']}")
+                if ev.get("operator"):
+                    detail_bits.append(f"Operador: {ev['operator']}")
+                if ev.get("card_type_match"):
+                    detail_bits.append(f"Tipo: {ev['card_type_match']}")
+                detail_bits.append(f"UID: {ev['card_uid']}")
+                lines.append(
+                    ft.Text(" · ".join(detail_bits), size=11, color=theme.TEXT_MUTED)
+                )
+                rows.append(
+                    ft.Container(
+                        content=ft.Column(lines, spacing=2, tight=True),
+                        padding=ft.Padding(12, 8, 12, 8),
+                        bgcolor=theme.SURFACE_ALT,
+                        border=ft.Border.all(1, theme.BORDER),
+                        border_radius=8,
+                    )
+                )
+            events_list.controls = rows
+
+        show_toast(page, msg, "success")
+        page.update()
+
+    return SectionCard(
+        title="S70 Audit Trail — Lectura de eventos de apertura",
+        content=ft.Column(
+            [
+                ft.Text(
+                    "Coloca una tarjeta S70 (pasada previamente por una cerradura) en el encoder. "
+                    "Se extraen los eventos de apertura y se cruzan con la emision de tarjetas "
+                    "para identificar que huesped/operador entro a cada hora.",
+                    size=12, color=theme.TEXT_MUTED,
+                ),
+                ft.Container(height=8),
+                ft.Row([PrimaryButton("Leer S70", icon=ft.Icons.HISTORY_EDU_OUTLINED, on_click=on_submit)]),
+                ft.Container(height=12),
+                ft.Container(
+                    content=header_info,
+                    padding=ft.Padding(14, 12, 14, 12),
+                    bgcolor=theme.SURFACE_ALT,
+                    border=ft.Border.all(1, theme.BORDER),
+                    border_radius=10,
+                ),
+                events_host,
+            ],
+            spacing=8,
         ),
     )
 

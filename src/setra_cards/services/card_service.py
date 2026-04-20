@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import update as sql_update
 from sqlalchemy.orm import Session
@@ -21,6 +21,7 @@ from setra_cards.cards.builder import (
     build_setting_card,
 )
 from setra_cards.cards.reader import read_card
+from setra_cards.cards.s70_reader import read_s70_card, S70CardData
 from setra_cards.cards.writer import blank_card, write_card
 from setra_cards.core.app_state import HotelConfig
 from setra_cards.encoder.driver import EncoderDriver
@@ -157,6 +158,147 @@ def create_guest_card(
         guest_id=guest.id if guest else None,
         valid_from=valid_from, expires_at=valid_until,
         message=f"Tarjeta grabada para hab. {room.display_number}",
+    )
+
+
+def change_guest_room(
+    *,
+    encoder: EncoderDriver,
+    hotel: HotelConfig,
+    session: Session,
+    old_room: Room,
+    new_room: Room,
+    operator: str,
+) -> CardResult:
+    """Cambia a un huesped de habitacion mid-stay.
+
+    Lee la Guest card actual del encoder (debe ser de old_room), la reescribe
+    con los datos de new_room preservando checkout y huesped, invalida el
+    CardLog anterior, crea uno nuevo, marca old_room como 'sucia' y new_room
+    como 'ocupada' en una sola transaccion.
+
+    El usuario debe pasar la tarjeta reescrita por la cerradura de new_room
+    para que aprenda la nueva habitacion.
+    """
+    if old_room.id == new_room.id:
+        return CardResult(False, "Guest", error="La habitacion destino es la misma")
+
+    # 1) Leer tarjeta actual para validar que es Guest de old_room
+    decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
+    if not decoded:
+        return CardResult(False, "Guest", error="No se pudo leer la tarjeta. Coloquela en el encoder.")
+    if decoded.card_type != CARD_TYPE_GUEST:
+        return CardResult(False, "Guest", error="La tarjeta no es Guest — use checkout + nuevo check-in")
+    # Validar que la tarjeta corresponde a old_room (por building+floor+room_no_id)
+    if (decoded.building != old_room.building or
+            decoded.floor != old_room.floor or
+            decoded.room_no_id != old_room.room_no_id):
+        return CardResult(
+            False, "Guest",
+            error=f"La tarjeta no pertenece a Hab. {old_room.display_number} (actual: edif {decoded.building} piso {decoded.floor})",
+        )
+
+    # 2) Buscar CardLog vigente para recuperar guest_id y checkout
+    now = datetime.now()
+    active = (
+        session.query(CardLog)
+        .filter(
+            CardLog.room_id == old_room.id,
+            CardLog.card_type == "Guest",
+            CardLog.success.is_(True),
+            CardLog.expires_at > now,
+        )
+        .order_by(CardLog.issued_at.desc())
+        .first()
+    )
+    if not active:
+        return CardResult(
+            False, "Guest",
+            error=f"No hay Guest card vigente en DB para Hab. {old_room.display_number}",
+        )
+
+    valid_until = active.expires_at or (now + timedelta(days=1))
+    guest = session.get(Guest, active.guest_id) if active.guest_id else None
+
+    # 3) Reescribir la tarjeta con los datos de new_room
+    try:
+        card_data = build_guest_card(
+            room=int(new_room.sequential_id),
+            now=now,
+            checkout=valid_until,
+            sig=hotel.signature,
+            building=new_room.building,
+            floor=new_room.floor,
+            room_no_id=new_room.room_no_id,
+        )
+    except Exception as exc:
+        logger.exception("Error construyendo guest card en change_guest_room")
+        return CardResult(False, "Guest", error=f"Error interno: {exc}")
+
+    result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key,
+                        building=new_room.building)
+    uid_hex = result.uid.hex(":") if result.uid else None
+    if not result.success:
+        _log_emission(
+            session, "Guest", CARD_TYPE_GUEST, uid_hex, False, operator,
+            room=new_room, guest=guest, valid_from=now, expires_at=valid_until,
+            error=f"change_room: {result.error}",
+        )
+        return CardResult(False, "Guest", uid_hex=uid_hex, error=result.error or "Error al reescribir tarjeta")
+
+    # 4) Transaccion atomica: expirar CardLog viejo + cambiar estados + log nuevo + audit
+    from sqlalchemy import update as sql_update
+    try:
+        session.execute(
+            sql_update(CardLog)
+            .where(
+                CardLog.room_id == old_room.id,
+                CardLog.card_type == "Guest",
+                CardLog.success.is_(True),
+                CardLog.expires_at > now,
+            )
+            .values(expires_at=now)
+        )
+        # Estados: old → sucia (pendiente limpieza), new → ocupada... usamos sucia/limpia
+        old_r = session.get(Room, old_room.id)
+        new_r = session.get(Room, new_room.id)
+        if old_r is not None:
+            old_r.state = "sucia"
+        # new_room queda como esta (el staff cambia el estado segun su flujo)
+        # Crear CardLog nuevo
+        session.add(CardLog(
+            card_type="Guest",
+            card_type_byte=CARD_TYPE_GUEST,
+            guest_id=guest.id if guest else None,
+            room_id=new_room.id,
+            room_display=new_room.display_number,
+            uid_hex=uid_hex,
+            valid_from=now,
+            expires_at=valid_until,
+            operator=operator,
+            success=True,
+        ))
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.exception("Error en transaccion change_guest_room")
+        return CardResult(False, "Guest", uid_hex=uid_hex,
+                          error=f"Tarjeta reescrita pero falló DB: {exc}")
+
+    log_action(
+        session, "room_change", operator,
+        f"Hab. {old_room.display_number} → {new_room.display_number}"
+        + (f", {guest.name}" if guest else ""),
+    )
+
+    return CardResult(
+        True, "Guest", uid_hex=uid_hex, room_display=new_room.display_number,
+        guest_id=guest.id if guest else None,
+        valid_from=now, expires_at=valid_until,
+        message=(
+            f"Tarjeta reescrita: Hab. {old_room.display_number} → {new_room.display_number}. "
+            f"Pasala por la cerradura de {new_room.display_number} para sincronizar."
+        ),
     )
 
 
@@ -339,6 +481,105 @@ def read_existing_card(
         "valid_until": getattr(decoded, "valid_until", None),
     }
     return True, "Tarjeta leida", info
+
+
+def read_s70_data_card(
+    *,
+    encoder: EncoderDriver,
+    hotel: HotelConfig,
+    session: Session,
+    operator: str,
+) -> tuple[bool, str, dict]:
+    """Lee una tarjeta S70 Data Card, extrae eventos de apertura y los
+    persiste en s70_events. Cruza cada evento contra CardLog por UID para
+    identificar que huesped/operador fue el que abrio.
+
+    Retorna (ok, message, info). info incluye 'events' enriquecidos con
+    guest_name / operator cuando hay match en CardLog.
+    """
+    from setra_cards.storage.models import S70EventLog
+
+    data = read_s70_card(encoder, hotel.signature)
+    if data is None:
+        return False, "No se detecto tarjeta en el encoder", {}
+    if not data.is_s70:
+        return False, f"La tarjeta no es S70 Data Card (marca: '{data.marker}')", {}
+
+    # Persistir eventos nuevos y enriquecer con match contra CardLog
+    enriched_events: list[dict] = []
+    new_count = 0
+    for ev in data.events:
+        # Match por UID contra CardLog
+        match = None
+        if ev.card_uid_hex:
+            match = (
+                session.query(CardLog)
+                .filter(CardLog.uid_hex == ev.card_uid_hex)
+                .order_by(CardLog.issued_at.desc())
+                .first()
+            )
+
+        # Deduplicar: mismo s70_uid + card_uid + event_time = mismo evento
+        existing = None
+        if ev.timestamp:
+            existing = (
+                session.query(S70EventLog)
+                .filter(
+                    S70EventLog.s70_uid_hex == data.uid_hex,
+                    S70EventLog.card_uid_hex == ev.card_uid_hex,
+                    S70EventLog.event_time == ev.timestamp,
+                )
+                .first()
+            )
+
+        if not existing:
+            session.add(S70EventLog(
+                s70_uid_hex=data.uid_hex,
+                card_number=data.card_number,
+                event_type=ev.event_type,
+                event_type_name=ev.event_type_name,
+                card_uid_hex=ev.card_uid_hex,
+                event_time=ev.timestamp,
+                extra=ev.extra,
+                building=data.building,
+                floor=data.floor,
+            ))
+            new_count += 1
+
+        enriched_events.append({
+            "event_type": ev.event_type,
+            "event_type_name": ev.event_type_name,
+            "card_uid": ev.card_uid_hex,
+            "timestamp": ev.timestamp.strftime("%d/%m/%Y %H:%M") if ev.timestamp else "—",
+            "extra": ev.extra,
+            "guest_name": (
+                session.get(Guest, match.guest_id).name
+                if match and match.guest_id else None
+            ) if match else None,
+            "room_display": match.room_display if match else None,
+            "operator": match.operator if match else None,
+            "card_type_match": match.card_type if match else None,
+        })
+
+    session.commit()
+    log_action(
+        session, "s70_read", operator,
+        f"S70 {data.uid_hex}: {len(data.events)} eventos ({new_count} nuevos)",
+    )
+
+    info = {
+        "s70_uid": data.uid_hex,
+        "marker": data.marker,
+        "card_number": data.card_number,
+        "collection_date": data.collection_date_str,
+        "building": data.building,
+        "floor": data.floor,
+        "zone": data.zone,
+        "sectors_read": data.sectors_read,
+        "events": enriched_events,
+        "new_count": new_count,
+    }
+    return True, f"{len(data.events)} eventos leidos ({new_count} nuevos)", info
 
 
 def active_cards_for_room(session: Session, room: Room, now: datetime | None = None) -> list[CardLog]:

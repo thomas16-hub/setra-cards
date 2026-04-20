@@ -450,10 +450,17 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
         spacing=4,
     )
 
+    def do_change_room(e=None):
+        _page_close(page, dlg)
+        _open_change_room_form(page, room, active_info, sf, state, refresh)
+
     action_row = ft.Row(spacing=8)
     if not occupied and can_checkin:
         action_row.controls.append(PrimaryButton("Check-in", on_click=do_checkin, icon=ft.Icons.LOGIN))
     if occupied and can_checkout:
+        action_row.controls.append(
+            SecondaryButton("Cambiar hab.", on_click=do_change_room, icon=ft.Icons.SWAP_HORIZ)
+        )
         action_row.controls.append(
             SecondaryButton("Checkout", on_click=do_checkout, icon=ft.Icons.LOGOUT, danger=True)
         )
@@ -602,6 +609,136 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         actions=[
             ft.TextButton(content=ft.Text("Cancelar"), on_click=do_close),
             PrimaryButton("Emitir tarjeta", on_click=do_confirm, icon=ft.Icons.CREDIT_CARD),
+        ],
+        actions_alignment=ft.MainAxisAlignment.END,
+        bgcolor=theme.SURFACE,
+        shape=ft.RoundedRectangleBorder(radius=theme.CARD_RADIUS),
+    )
+    _page_open(page, dlg)
+
+
+def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) -> None:
+    """Dialogo de cambio de habitacion mid-stay."""
+    from setra_cards.services.card_service import change_guest_room
+
+    # Listar habitaciones disponibles (no ocupadas, estado 'limpia')
+    with sf() as s:
+        rooms_raw = rooms_service.list_rooms(s)
+        # Filtrar: no la actual, estado limpia, sin CardLog vigente
+        now = datetime.now()
+        active_room_ids = set(
+            r[0] for r in s.query(CardLog.room_id)
+            .filter(
+                CardLog.card_type == "Guest",
+                CardLog.success.is_(True),
+                CardLog.expires_at > now,
+            ).distinct().all()
+        )
+        available = [
+            {"id": r.id, "display_number": r.display_number,
+             "building": r.building, "floor": r.floor, "state": r.state}
+            for r in rooms_raw
+            if r.id != room["id"] and r.id not in active_room_ids and r.state == "limpia"
+        ]
+
+    if not available:
+        show_toast(page, "No hay habitaciones disponibles (limpias y libres)", "error")
+        return
+
+    guest_name = active_info["guest_name"] if active_info else "(sin huesped)"
+    checkout_str = (
+        active_info["expires_at"].strftime("%d/%m/%Y %H:%M")
+        if active_info and active_info["expires_at"] else "—"
+    )
+
+    target_dd = ft.Dropdown(
+        label="Nueva habitacion",
+        options=[
+            ft.dropdown.Option(str(r["id"]),
+                               f"Hab. {r['display_number']} (edif {r['building']} piso {r['floor']})")
+            for r in available
+        ],
+        value=str(available[0]["id"]),
+        border_radius=theme.INPUT_RADIUS,
+    )
+
+    def do_close(e=None):
+        _page_close(page, dlg)
+
+    def do_confirm(e=None):
+        if not state.encoder:
+            show_toast(page, "Encoder no conectado", "error")
+            return
+        new_room_id = int(target_dd.value) if target_dd.value else None
+        if not new_room_id:
+            return
+        _page_close(page, dlg)
+        op_name = state.operator.name if state.operator else "?"
+        with sf() as s:
+            old_r = s.get(Room, room["id"])
+            new_r = s.get(Room, new_room_id)
+            if not old_r or not new_r:
+                show_toast(page, "Habitaciones no encontradas", "error")
+                return
+            result = change_guest_room(
+                encoder=state.encoder,
+                hotel=state.hotel,
+                session=s,
+                old_room=old_r,
+                new_room=new_r,
+                operator=op_name,
+            )
+        if result.ok:
+            show_toast(page, result.message or "Tarjeta reescrita", "success")
+        else:
+            show_toast(page, result.error or "Error al cambiar habitacion", "error")
+        refresh()
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        title=ft.Text(f"Cambiar hab. {room['display_number']}", size=18,
+                      weight=ft.FontWeight.W_700, color=theme.TEXT),
+        content=ft.Container(
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([
+                                ft.Icon(ft.Icons.PERSON, size=14, color=theme.GOLD),
+                                ft.Text(guest_name, size=13, color=theme.GOLD_LIGHT,
+                                        weight=ft.FontWeight.W_600),
+                            ], spacing=6),
+                            ft.Row([
+                                ft.Icon(ft.Icons.SCHEDULE, size=14, color=theme.TEXT_MUTED),
+                                ft.Text(f"Checkout actual: {checkout_str}", size=12,
+                                        color=theme.TEXT_MUTED),
+                            ], spacing=6),
+                        ], spacing=4, tight=True),
+                        bgcolor=theme.SURFACE_ALT,
+                        border=ft.Border.all(1, theme.BORDER),
+                        border_radius=8,
+                        padding=ft.Padding(12, 10, 12, 10),
+                    ),
+                    ft.Container(height=6),
+                    target_dd,
+                    ft.Container(height=6),
+                    ft.Text(
+                        "Coloca la tarjeta del huesped en el encoder. Se reescribira "
+                        "preservando huesped y checkout. Luego pasala por la cerradura "
+                        "de la nueva habitacion.",
+                        size=11,
+                        color=theme.TEXT_MUTED,
+                    ),
+                ],
+                spacing=8,
+                tight=True,
+            ),
+            width=460,
+            padding=ft.Padding(4, 8, 4, 4),
+        ),
+        actions=[
+            ft.TextButton(content=ft.Text("Cancelar"), on_click=do_close),
+            PrimaryButton("Reescribir tarjeta", on_click=do_confirm, icon=ft.Icons.SWAP_HORIZ),
         ],
         actions_alignment=ft.MainAxisAlignment.END,
         bgcolor=theme.SURFACE,
