@@ -172,16 +172,17 @@ def build_master_card(
     building: int = 1,
     floor: int = 1,
 ) -> CardData:
-    """Build Master card (0x40).
+    """Build Master card (0x40) — abre TODAS las cerraduras del sistema.
 
-    - Opens ALL rooms in the system
-    - room_no_id = 0x00 (wildcard: abre cualquiera)
+    Tail bytes 12-15 = 00 00 00 00 (sin tie a building/floor/room_no_id)
+    El card_type 0x40 en byte[0] es lo que el firmware identifica como
+    "master global". Valido en cualquier cerradura que tenga la firma del sistema.
     """
     block45 = (
         bytes([CARD_TYPE_MASTER, 0x00])
         + make_date_bytes(now)
         + make_date_bytes(expire)
-        + bytes([building, floor, 0x00, 0x00])
+        + bytes([0x00, 0x00, 0x00, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature
@@ -202,16 +203,17 @@ def build_laundry_card(
     building: int = 1,
     floor: int = 1,
 ) -> CardData:
-    """Build Laundry/Housekeeping card (0x20).
+    """Build Laundry/Housekeeping card (0x20) — abre todas las cerraduras del sistema.
 
-    - Opens rooms for cleaning staff
-    - room_no_id = 0x00 (wildcard: abre cualquiera del floor/building)
+    Tail bytes 12-15 = 00 00 00 00. El card_type 0x20 hace que el firmware
+    reconozca la tarjeta como "housekeeping global" — valida solo firma del
+    sistema, no room_no_id especifico.
     """
     block45 = (
         bytes([CARD_TYPE_LAUNDRY, 0x00])
         + make_date_bytes(now)
         + make_date_bytes(expire)
-        + bytes([building, floor, 0x00, 0x00])
+        + bytes([0x00, 0x00, 0x00, 0x00])
     )
 
     block46_prefix = bytes(13) + sig.signature

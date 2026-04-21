@@ -81,6 +81,7 @@ def build(page: ft.Page) -> ft.Control:
                     "sequential_id": r.sequential_id,
                     "building": r.building,
                     "floor": r.floor,
+                    "room_no_id": r.room_no_id,
                     "state": r.state,
                 }
                 for r in rooms
@@ -557,6 +558,7 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
             sequential_id=room["sequential_id"],
             building=room["building"],
             floor=room["floor"],
+            room_no_id=room.get("room_no_id", 1),
         )
         op_name = state.operator.name if state.operator else "?"
         with sf() as s:
