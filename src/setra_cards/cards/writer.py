@@ -48,6 +48,35 @@ def _auth_keys_auth_card() -> list[tuple[str, bytes, int]]:
     ]
 
 
+def _write_blocks_with_keys(
+    encoder: EncoderDriver,
+    sector: int,
+    blocks: list[tuple[int, bytes, str]],
+    key_list: list[tuple[str, bytes, int]],
+) -> tuple[bool, str]:
+    """Escribe los 4 bloques. Por bloque prueba cada key hasta conseguir
+    auth+write exitosos. Retorna (ok, error_detail)."""
+    for block_num, data, name in blocks:
+        encoder.detect_card()
+        written = False
+        last_err = ""
+        for key_name, key, kt in key_list:
+            encoder.load_key(kt, sector, key)
+            encoder.detect_card()
+            if not encoder.auth_sector(sector, kt):
+                last_err = f"auth {key_name} FAIL"
+                continue
+            if encoder.write_block(block_num, data):
+                logger.debug("Write OK with %s for %s", key_name, name)
+                written = True
+                break
+            last_err = f"auth {key_name} OK pero write FAIL"
+            encoder.detect_card()
+        if not written:
+            return False, f"{name}: {last_err}"
+    return True, ""
+
+
 def write_card(
     encoder: EncoderDriver,
     sector: int,
@@ -60,6 +89,7 @@ def write_card(
 
     Sequence per block: re-detect → load key → auth → write.
     Tries multiple keys to handle blank and pre-programmed cards.
+    Si falla, hace blank automatico y reintenta una vez.
     """
     detection = encoder.detect_card()
     if not detection:
@@ -81,24 +111,26 @@ def write_card(
         (sector * 4 + 3, card.trailer, "trailer"),
     ]
 
-    for block_num, data, name in blocks:
-        # Re-detect card before each block (required by encoder)
-        encoder.detect_card()
+    # Intento 1: write directo
+    ok, err = _write_blocks_with_keys(encoder, sector, blocks, key_list)
 
-        authed = False
-        for key_name, key, kt in key_list:
-            encoder.load_key(kt, sector, key)
-            encoder.detect_card()
-            if encoder.auth_sector(sector, kt):
-                logger.debug("Auth OK with %s for %s", key_name, name)
-                authed = True
-                break
-
-        if not authed:
-            return WriteResult(success=False, uid=uid, error=f"Auth failed for {name}")
-
-        if not encoder.write_block(block_num, data):
-            return WriteResult(success=False, uid=uid, error=f"Write failed for {name}")
+    # Intento 2: si fallo, hacer blank y reintentar
+    if not ok:
+        logger.info("Write fallo (%s). Intentando auto-blank + rewrite...", err)
+        blank_res = blank_card(encoder, sector)
+        if not blank_res.success:
+            return WriteResult(
+                success=False, uid=uid,
+                error=f"No se pudo escribir ni borrar la tarjeta: {err} / blank: {blank_res.error}",
+            )
+        # Tras blank, la tarjeta tiene keys FF — reintentar con key_list entero
+        ok, err = _write_blocks_with_keys(encoder, sector, blocks, key_list)
+        if not ok:
+            return WriteResult(
+                success=False, uid=uid,
+                error=f"Write fallo incluso tras auto-blank: {err}",
+            )
+        logger.info("Auto-blank + rewrite exitoso tras fallo inicial")
 
     logger.info("Card programmed OK: UID=%s", uid.hex(":"))
     encoder.halt()

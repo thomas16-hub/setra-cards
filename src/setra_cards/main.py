@@ -52,7 +52,54 @@ def build_app(page: ft.Page) -> None:
     page.add(login_build(page))
 
 
+def _reset_admin() -> int:
+    """Elimina al operador 'Admin' para que se recree con PIN=1234 al próximo login."""
+    from setra_cards.storage.models import Operator
+    sf = init_db()
+    with sf() as s:
+        admin = s.query(Operator).filter(Operator.name == "Admin").first()
+        if admin:
+            s.delete(admin)
+            s.commit()
+            print("OK: operador 'Admin' eliminado. Al abrir la app se recreara con PIN=1234.")
+            print("    La app te pedira cambiar el PIN al primer login.")
+            return 0
+        # Si no hay Admin, puede haber un super_manager con otro nombre
+        super_op = s.query(Operator).filter(Operator.role == "super_manager").first()
+        if super_op:
+            # Reset PIN del super_manager existente a 1234
+            from setra_cards.services.auth import hash_new_pin
+            h, salt = hash_new_pin("1234")
+            super_op.pin_hash = h
+            super_op.pin_salt = salt
+            super_op.must_change_pin = True
+            s.commit()
+            print(f"OK: PIN de '{super_op.name}' (super_manager) reseteado a 1234.")
+            print(f"    Usuario: {super_op.name}")
+            print(f"    PIN:     1234")
+            print(f"    La app te pedira cambiar el PIN al primer login.")
+            return 0
+        print("ERROR: no hay operador Admin ni super_manager. Abre la app normal — se creara Admin/1234.")
+        return 1
+
+
 def main() -> None:
+    # Flag de recuperación: no arranca la UI, solo resetea el Admin y sale.
+    if "--reset-admin" in sys.argv:
+        _configure_logging()
+        import ctypes
+        try:
+            ctypes.windll.kernel32.AllocConsole()
+        except Exception:
+            pass
+        try:
+            code = _reset_admin()
+        except Exception as exc:
+            print(f"ERROR: {exc}")
+            code = 2
+        input("\nPresiona ENTER para cerrar...")
+        sys.exit(code)
+
     _configure_logging()
     logger = logging.getLogger(__name__)
     logger.info("Setra CARDS v%s arrancando", __version__)
