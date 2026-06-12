@@ -1,21 +1,42 @@
-"""Updater — queries GitHub Releases and applies updates.
+"""Updater — queries a SIGNED manifest on portonsabaneta.com and applies updates.
+
+The old channel (GitHub Releases) broke when the repo went private: anonymous
+API calls return 404/403. The channel is now a small JSON manifest hosted at
+portonsabaneta.com, every release SIGNED OFFLINE with an Ed25519 private key
+that NEVER touches this machine. Only the 32-byte PUBLIC key is embedded here.
 
 Updates are NOT fully automatic: installing always requires the operator to
 press "Buscar actualizacion" (or "Instalar ahora") in the Admin view. At
 startup, main() runs a best-effort, non-blocking check that only LOGS when a
 new version is available — it never downloads or installs on its own.
 
+Manifest schema (latest.json):
+    {
+      "version": "2.1.0",
+      "url": "https://portonsabaneta.com/setra-cards-flet/setra-cards-v2.1.0.zip",
+      "sha256": "<64 hex>",
+      "signature": "<128 hex = Ed25519 signature>",
+      "notes": "..."
+    }
+
+The signature covers the canonical message bytes:
+    f"{version}|{url}|{sha256}".encode()
+
 Flow:
 1. Startup check (log-only) or operator presses "Buscar actualizacion":
-   - GET https://api.github.com/repos/thomas16-hub/setra-cards/releases/latest
-   - Extracts `tag_name` (e.g. v2.1.0) and the .zip asset
+   - GET https://portonsabaneta.com/setra-cards-flet/latest.json
+   - VERIFY the Ed25519 signature with the embedded public key BEFORE trusting
+     anything. Reject if the signature fails, if the manifest is malformed, or
+     if the download URL is not under the trusted prefix (SSRF guard).
 2. If the version is newer than __version__ and the operator confirms:
    - Downloads the ZIP to temp
-   - Verifies the SHA-256 published in the release body (mandatory)
+   - Stream-verifies the published SHA-256 (mandatory)
+   - RE-VERIFIES the manifest signature before launching the swap
    - Launches apply_update.bat which closes the app, swaps files and relaunches
 """
 from __future__ import annotations
 
+import binascii
 import hashlib
 import json
 import logging
@@ -36,10 +57,25 @@ from setra_cards import __version__
 
 logger = logging.getLogger(__name__)
 
-GITHUB_REPO = "thomas16-hub/setra-cards"
-RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+# Signed-manifest channel on portonsabaneta. The path is DISTINCT from the old
+# Flet/Locstar prototype's /setra-cards/ tree so the two app trees never collide.
+MANIFEST_URL = "https://portonsabaneta.com/setra-cards-flet/latest.json"
+TRUSTED_DOWNLOAD_PREFIX = "https://portonsabaneta.com/setra-cards-flet/"
+
+# Ed25519 PUBLIC key (32-byte hex). The matching PRIVATE key stays OFFLINE: the
+# operator signs each release by hand and never copies the secret to any PC.
+UPDATER_PUBKEY_HEX = "d63c3018aba85c2a7aff8eedb30f25acc0d59d3021b71e9f1fcec3c2cccadc79"
+
+# Signature verification is mandatory. There is no unsigned fallback path.
+REQUIRE_SIGNED = True
+
 TIMEOUT = 15
-ASSET_NAME_PATTERN = re.compile(r"setra-cards.*\.zip$", re.IGNORECASE)
+
+# Spanish operator-facing messages (technical detail stays in the logs).
+ERR_BAD_SIGNATURE = "Firma del manifest inválida — actualización rechazada"
+ERR_UNTRUSTED_URL = "URL de descarga no confiable — actualización rechazada"
+ERR_NETWORK = "Canal de actualización no disponible — contactar a soporte SETRA"
+ERR_BAD_MANIFEST = "Manifest de actualización inválido — contactar a soporte SETRA"
 
 
 def _make_ssl_context() -> ssl.SSLContext:
@@ -66,6 +102,7 @@ class UpdateInfo:
     asset_name: str
     sha256: str | None
     notes: str
+    signature: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,54 +123,102 @@ def _parse_version(v: str) -> tuple[int, ...]:
     return tuple(digits) if digits else (0,)
 
 
-def _extract_sha256_from_body(body: str) -> str | None:
-    m = re.search(r"sha256[:\s]+([a-f0-9]{64})", body or "", re.IGNORECASE)
-    return m.group(1).lower() if m else None
+def _verify_manifest_signature(
+    version: str, url: str, sha256: str, signature_hex: str
+) -> bool:
+    """Verify the Ed25519 signature over f"{version}|{url}|{sha256}".
+
+    Uses pycryptodome's documented Ed25519 path: import the raw 32-byte public
+    key with eddsa.import_public_key, then verify with eddsa.new(key,'rfc8032').
+    Any malformed input (bad hex, wrong length, bad signature) is treated as a
+    verification failure: returns False and logs a warning — never raises.
+    """
+    try:
+        from Crypto.PublicKey import ECC  # noqa: F401  (ensures backend is present)
+        from Crypto.Signature import eddsa
+
+        pub_raw = binascii.unhexlify(UPDATER_PUBKEY_HEX)
+        if len(pub_raw) != 32:
+            logger.warning("Embedded updater pubkey is not 32 bytes — rejecting")
+            return False
+
+        signature = binascii.unhexlify(signature_hex)
+        if len(signature) != 64:
+            logger.warning("Manifest signature is not 64 bytes — rejecting")
+            return False
+
+        message = f"{version}|{url}|{sha256}".encode()
+        pubkey = eddsa.import_public_key(pub_raw)
+        verifier = eddsa.new(pubkey, "rfc8032")
+        verifier.verify(message, signature)
+        return True
+    except (ValueError, binascii.Error, TypeError) as exc:
+        # ValueError covers a failed verification AND malformed key/signature.
+        logger.warning("Manifest signature verification failed: %s", exc)
+        return False
+    except Exception as exc:  # pragma: no cover — defensive, never propagate
+        logger.warning("Manifest signature verification crashed: %s", exc)
+        return False
+
+
+def _asset_name_from_url(url: str) -> str:
+    name = url.rsplit("/", 1)[-1].split("?", 1)[0]
+    return name or "setra-cards-update.zip"
 
 
 def check_for_update() -> CheckResult:
     try:
         req = urllib.request.Request(
-            RELEASES_API,
+            MANIFEST_URL,  # hardcoded https URL, never operator-controlled
             headers={
                 "User-Agent": f"SetraCARDS/{__version__}",
-                "Accept": "application/vnd.github+json",
+                "Accept": "application/json",
             },
         )
-        with urllib.request.urlopen(req, timeout=TIMEOUT, context=_SSL_CTX) as resp:
+        # B310: scheme is a hardcoded https:// literal (MANIFEST_URL), not user input.
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=_SSL_CTX) as resp:  # nosec B310
             data = json.loads(resp.read().decode("utf-8"))
-
-        tag = str(data.get("tag_name", ""))
-        assets = data.get("assets") or []
-        zip_asset = next((a for a in assets if ASSET_NAME_PATTERN.match(a.get("name", ""))), None)
-        if not zip_asset:
-            return CheckResult(__version__, None, False, error="No hay asset .zip en el release")
-
-        latest = UpdateInfo(
-            version=tag,
-            asset_url=zip_asset.get("browser_download_url", ""),
-            asset_name=zip_asset.get("name", ""),
-            sha256=_extract_sha256_from_body(data.get("body", "")),
-            notes=data.get("body") or "",
-        )
-        has = _parse_version(latest.version) > _parse_version(__version__)
-        return CheckResult(__version__, latest, has)
     except urllib.error.HTTPError as exc:
-        # Keep the raw error in the log; never show "HTTP Error 404" to the operator.
-        logger.warning("GitHub releases check failed: HTTP %s — %s", exc.code, exc)
-        if exc.code in (403, 404):
-            # Repo went private — anonymous API calls now return 404/403.
-            # TODO: migrate the update channel to portonsabaneta.com/setra-cards/
-            # with an Ed25519-signed manifest (same scheme as locstar-app);
-            # deferred — needs infra decisions.
-            return CheckResult(
-                __version__, None, False,
-                error="Canal de actualización no disponible — contactar a soporte SETRA",
-            )
-        return CheckResult(__version__, None, False, error=str(exc))
+        # Never leak raw HTTP codes to the operator; keep them in the log.
+        logger.warning("Manifest check failed: HTTP %s — %s", exc.code, exc)
+        return CheckResult(__version__, None, False, error=ERR_NETWORK)
     except Exception as exc:
-        logger.warning("GitHub releases check failed: %s", exc)
-        return CheckResult(__version__, None, False, error=str(exc))
+        logger.warning("Manifest check failed: %s", exc)
+        return CheckResult(__version__, None, False, error=ERR_NETWORK)
+
+    if not isinstance(data, dict):
+        logger.warning("Manifest is not a JSON object")
+        return CheckResult(__version__, None, False, error=ERR_BAD_MANIFEST)
+
+    version = str(data.get("version") or "")
+    url = str(data.get("url") or "")
+    sha256 = str(data.get("sha256") or "").lower()
+    signature_hex = str(data.get("signature") or "")
+    notes = str(data.get("notes") or "")
+
+    if not version or not url or not re.fullmatch(r"[a-f0-9]{64}", sha256):
+        logger.warning("Manifest missing/invalid version/url/sha256")
+        return CheckResult(__version__, None, False, error=ERR_BAD_MANIFEST)
+
+    # SSRF guard: only ever download from the exact trusted prefix.
+    if not url.startswith(TRUSTED_DOWNLOAD_PREFIX):
+        logger.warning("Manifest url outside trusted prefix: %s", url)
+        return CheckResult(__version__, None, False, error=ERR_UNTRUSTED_URL)
+
+    # Verify signature BEFORE trusting any field. No unsigned path exists.
+    if REQUIRE_SIGNED and not _verify_manifest_signature(version, url, sha256, signature_hex):
+        return CheckResult(__version__, None, False, error=ERR_BAD_SIGNATURE)
+
+    latest = UpdateInfo(
+        version=version,
+        asset_url=url,
+        asset_name=_asset_name_from_url(url),
+        sha256=sha256,
+        notes=notes,
+        signature=signature_hex,
+    )
+    has = _parse_version(latest.version) > _parse_version(__version__)
+    return CheckResult(__version__, latest, has)
 
 
 def _install_root() -> Path:
@@ -183,6 +268,18 @@ def apply_update(info: UpdateInfo) -> None:
     if not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
         raise ValueError(f"SHA-256 inválido en el release: {info.sha256}")
 
+    # SSRF guard (defence in depth): only download from the trusted prefix.
+    if not info.asset_url.startswith(TRUSTED_DOWNLOAD_PREFIX):
+        raise ValueError(ERR_UNTRUSTED_URL)
+
+    # Re-verify the signature before doing anything destructive. check_for_update
+    # already verified it, but re-check so a stale/forged UpdateInfo can't slip
+    # straight into apply_update from another path.
+    if REQUIRE_SIGNED and not _verify_manifest_signature(
+        info.version, info.asset_url, expected_sha, info.signature
+    ):
+        raise ValueError(ERR_BAD_SIGNATURE)
+
     install_dir = _install_root()
     exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else "Setra-CARDS.exe"
 
@@ -193,9 +290,10 @@ def apply_update(info: UpdateInfo) -> None:
 
     logger.info("Descargando %s -> %s", info.asset_url, zip_path)
     hasher = hashlib.sha256()
+    # B310: asset_url already validated against TRUSTED_DOWNLOAD_PREFIX (https only).
     req = urllib.request.Request(info.asset_url, headers={"User-Agent": f"SetraCARDS/{__version__}"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT * 4, context=_SSL_CTX) as resp, zip_path.open("wb") as f:
+        with urllib.request.urlopen(req, timeout=TIMEOUT * 4, context=_SSL_CTX) as resp, zip_path.open("wb") as f:  # nosec B310
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
@@ -213,6 +311,14 @@ def apply_update(info: UpdateInfo) -> None:
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+    # Re-verify the signature AFTER the download, before launching the swap, now
+    # that the SHA we trusted is the one we actually received.
+    if REQUIRE_SIGNED and not _verify_manifest_signature(
+        info.version, info.asset_url, expected_sha, info.signature
+    ):
+        shutil.rmtree(staging, ignore_errors=True)
+        raise ValueError(ERR_BAD_SIGNATURE)
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.namelist():

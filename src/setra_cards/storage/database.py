@@ -125,6 +125,10 @@ def _run_migrations(engine) -> None:
         ("card_log", "room_id", "INTEGER REFERENCES rooms(id)"),
         ("card_log", "guest_id", "INTEGER REFERENCES guests(id)"),
         ("rooms", "room_no_id", "INTEGER NOT NULL DEFAULT 1"),
+        # Tamper-evident audit hash chain. Nullable: existing rows keep NULL
+        # hashes; the chain is verifiable from the first hashed row forward.
+        ("action_log", "prev_hash", "VARCHAR(64)"),
+        ("action_log", "entry_hash", "VARCHAR(64)"),
     ]
     with engine.connect() as conn:
         # Snapshot BEFORE the ALTERs: the backfill must only ever run when

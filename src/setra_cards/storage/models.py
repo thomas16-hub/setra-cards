@@ -145,6 +145,12 @@ class ActionLog(Base):
     operator: Mapped[str] = mapped_column(String(50))
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # Tamper-evident hash chain. Nullable so pre-existing rows/DBs keep working;
+    # the chain is verifiable from the first row that carries a hash forward.
+    # prev_hash = entry_hash of the immediately preceding row ("" for the first).
+    # entry_hash = sha256(prev_hash || action || operator || detail || ts_iso).
+    prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    entry_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class LoginAttempt(Base):

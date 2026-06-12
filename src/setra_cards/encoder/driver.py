@@ -234,6 +234,34 @@ class EncoderDriver:
 
     # --- Public API (thread-safe) ---
 
+    @contextmanager
+    def transaction(self, blocking: bool = True, timeout: float = -1.0) -> Generator[bool, None, None]:
+        """Hold the SERVICE-LEVEL emission lock for a whole multi-command operation.
+
+        This is DIFFERENT from ``self._lock`` (the per-command lock taken inside
+        each ``write_block`` / ``read_block`` / ``auth_sector`` call). ``_lock``
+        serializes a single serial frame; ``transaction()`` serializes a whole
+        card operation (~20 commands) so two operations can never interleave
+        commands on the encoder.
+
+        Yields ``True`` when the lock was acquired, ``False`` when a
+        non-blocking acquire failed (another operation is already in flight).
+
+        LOCK ORDERING — the emission lock is the OUTER lock, ``self._lock`` is
+        the INNER lock. NEVER acquire the emission lock while holding
+        ``self._lock``. This contextmanager only takes the OUTER lock; the inner
+        per-command lock is taken later, inside each public driver method.
+
+        Delegates to ``encoder_service._emission_lock`` (imported lazily to
+        avoid the encoder_service -> driver import cycle) so there is a single
+        service-level lock shared by card_service, connect/disconnect and the
+        reconnect watchdog.
+        """
+        from setra_cards.services.encoder_service import emission_transaction
+
+        with emission_transaction(blocking=blocking, timeout=timeout) as acquired:
+            yield acquired
+
     def beep(self) -> bool:
         try:
             with self._lock:

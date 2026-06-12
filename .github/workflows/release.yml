@@ -74,15 +74,46 @@ jobs:
           echo "sha256=$hash" >> $env:GITHUB_OUTPUT
           echo "SHA-256: $hash"
 
-      - name: Create GitHub Release
+      # The live update channel is a SIGNED manifest on portonsabaneta.com, NOT
+      # GitHub Releases (the repo is private — anonymous API returns 404). This
+      # CI only builds + hashes the artifact. Signing the manifest happens
+      # OFFLINE: the Ed25519 private key never enters CI. Print the exact
+      # canonical message so the operator can sign it by hand.
+      - name: Emit canonical message to sign offline
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          $zip = "setra-cards-${{ github.ref_name }}.zip"
+          $url = "https://portonsabaneta.com/setra-cards-flet/$zip"
+          $sha = "${{ steps.sha.outputs.sha256 }}"
+          $msg = "$ver|$url|$sha"
+          Write-Host "=== Firmar OFFLINE (Ed25519 RFC 8032) este mensaje canonico ==="
+          Write-Host $msg
+          Write-Host "==============================================================="
+          Write-Host "Luego: build_exe/make_manifest.py build -> latest.json -> FTP a /setra-cards-flet/"
+
+      # Keep the artifact on the GitHub Release for archival/diagnostics, but the
+      # APP never fetches it from here. PUBLISH manually:
+      #   1) build_exe/make_manifest.py prepare  -> imprime el mensaje canonico
+      #   2) firmar OFFLINE con la llave privada en ~/.claude/credentials
+      #   3) build_exe/make_manifest.py build    -> genera latest.json
+      #   4) subir por FTP el .zip + latest.json a /setra-cards-flet/ en portonsabaneta.com
+      # NUNCA subir la llave privada a ningun lado.
+      - name: Archive build artifact (NOT the live channel)
         uses: softprops/action-gh-release@v2
         with:
           files: dist/setra-cards-*.zip
           body: |
             ## Setra CARDS ${{ github.ref_name }}
 
-            Descarga `setra-cards-${{ github.ref_name }}.zip`, descomprime
-            y ejecuta `Instalar.bat`.
+            Artefacto de build (archivo/diagnostico). El canal de actualizacion
+            EN VIVO es el manifest firmado en
+            `https://portonsabaneta.com/setra-cards-flet/latest.json`.
+
+            Publicar: firmar OFFLINE el mensaje canonico
+            `version|url|sha256`, generar `latest.json` con
+            `build_exe/make_manifest.py build`, y subir por FTP el `.zip` +
+            `latest.json` a `/setra-cards-flet/`.
 
             sha256: ${{ steps.sha.outputs.sha256 }}
           draft: false

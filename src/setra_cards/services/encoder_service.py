@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 
 from serial.tools import list_ports
 
@@ -18,6 +20,56 @@ from setra_cards.core.app_state import AppState
 from setra_cards.encoder.driver import EncoderDriver, detect_encoder_port
 
 logger = logging.getLogger(__name__)
+
+# --- Service-level emission lock --------------------------------------------
+#
+# `EncoderDriver._lock` only serializes INDIVIDUAL serial commands. A full card
+# write is ~20 commands; two operations (a double-click that slips past a UI
+# busy flag, or the watchdog/connect_port tearing down the port mid-write) can
+# interleave commands or close the port between commands, corrupting a card
+# that still ACKs every block. That is the silent "writes OK but won't open"
+# failure class.
+#
+# `_emission_lock` serializes whole card OPERATIONS instead. It is the OUTER
+# lock; `EncoderDriver._lock` is the INNER lock.
+#
+# LOCK ORDERING (must never be violated to avoid deadlock):
+#     _emission_lock  (outer, whole operation)
+#       -> driver._lock  (inner, single command)
+# NEVER acquire `_emission_lock` while holding `driver._lock`. The watchdog
+# tick must use a NON-BLOCKING try-acquire and bail when busy — it must never
+# block on this lock.
+#
+# RLock (not Lock) because `connect_port` is reentered by the watchdog tick:
+# the watchdog acquires the lock, then calls `connect_port`, which acquires it
+# again on the SAME thread. A plain Lock would self-deadlock there.
+_emission_lock = threading.RLock()
+
+
+@contextmanager
+def emission_transaction(blocking: bool = True, timeout: float = -1.0) -> Iterator[bool]:
+    """Hold the service-level emission lock for a whole encoder operation.
+
+    Yields ``True`` if the lock was acquired (caller owns the encoder for the
+    duration of the ``with`` block), ``False`` if a non-blocking acquire failed
+    because another operation is already in flight.
+
+    blocking=False  -> fail-fast (emit / blank should never wait behind another
+                       in-flight write; return the Spanish busy message instead).
+    blocking=True   -> wait for the in-flight operation to finish (read may wait
+                       briefly; connect/disconnect must be excluded during a
+                       write).
+
+    The lock is released even if the body raises, so a failing operation can
+    never leave the encoder permanently locked (no deadlock on normal completion
+    or on error).
+    """
+    acquired = _emission_lock.acquire(blocking=blocking, timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _emission_lock.release()
 
 # Descriptions / manufacturers that typically correspond to USB-serial chips
 # used by Locstar encoders. Also serves as the "recommended" filter in the UI.
@@ -57,36 +109,43 @@ def list_com_ports() -> list[ComPortInfo]:
 
 
 def connect_port(state: AppState, port: str) -> tuple[bool, str]:
-    """Try to connect the encoder on `port`. Closes the previous one if any."""
-    if state.encoder is not None:
+    """Try to connect the encoder on `port`. Closes the previous one if any.
+
+    Holds the emission lock for the whole connect so the port can never be
+    opened/swapped while a card operation is mid-write. The acquire is
+    reentrant: when the watchdog tick (which already holds the lock) calls this,
+    the same-thread RLock re-acquire succeeds instead of deadlocking.
+    """
+    with emission_transaction(blocking=True):
+        if state.encoder is not None:
+            try:
+                state.encoder.close()
+            except Exception:
+                pass
+            state.clear_encoder()
+
         try:
-            state.encoder.close()
-        except Exception:
-            pass
-        state.clear_encoder()
+            enc = EncoderDriver(port)
+            enc.open()
+        except Exception as exc:
+            logger.warning("Could not open encoder port %s: %s", port, exc)
+            return False, f"No se pudo abrir {port}: {exc}"
 
-    try:
-        enc = EncoderDriver(port)
-        enc.open()
-    except Exception as exc:
-        logger.warning("Could not open encoder port %s: %s", port, exc)
-        return False, f"No se pudo abrir {port}: {exc}"
+        if not enc.beep():
+            # Port opened but the device did not ACK the handshake — whatever is
+            # on this COM port, it is not a Locstar encoder. Never store it.
+            logger.warning("Port %s opened but did not ACK beep handshake", port)
+            try:
+                enc.close()
+            except Exception:
+                pass
+            return False, f"{port} no responde como encoder Locstar"
 
-    if not enc.beep():
-        # Port opened but the device did not ACK the handshake — whatever is
-        # on this COM port, it is not a Locstar encoder. Never store it.
-        logger.warning("Port %s opened but did not ACK beep handshake", port)
-        try:
-            enc.close()
-        except Exception:
-            pass
-        return False, f"{port} no responde como encoder Locstar"
-
-    state.set_encoder(enc, port)
-    # A fresh connection should be kept alive again by the watchdog.
-    _watchdog_paused.clear()
-    logger.info("Encoder connected on %s", port)
-    return True, f"Encoder conectado en {port}"
+        state.set_encoder(enc, port)
+        # A fresh connection should be kept alive again by the watchdog.
+        _watchdog_paused.clear()
+        logger.info("Encoder connected on %s", port)
+        return True, f"Encoder conectado en {port}"
 
 
 def _hint_ports() -> list[str]:
@@ -122,12 +181,15 @@ def disconnect(state: AppState, pause_watchdog: bool = True) -> None:
     """
     if pause_watchdog:
         _watchdog_paused.set()
-    if state.encoder is not None:
-        try:
-            state.encoder.close()
-        except Exception:
-            pass
-    state.clear_encoder()
+    # Hold the emission lock so the port is never closed between commands of an
+    # in-flight write. Reentrant for the same thread (RLock).
+    with emission_transaction(blocking=True):
+        if state.encoder is not None:
+            try:
+                state.encoder.close()
+            except Exception:
+                pass
+        state.clear_encoder()
 
 
 _watchdog_lock = threading.Lock()
@@ -142,19 +204,29 @@ def _watchdog_tick(state: AppState, last_port: str | None) -> str | None:
     Preserves the last-known port even when a reconnect attempt fails
     (connect_port clears state.encoder_port on failure), so the watchdog keeps
     retrying the same port instead of falling back to a blind scan.
+
+    NON-BLOCKING on the emission lock: if a card operation is mid-write, the
+    tick bails immediately (returns last_port) rather than tearing down the port
+    underneath the in-flight write. It must NEVER block on the lock — blocking
+    here would stall the watchdog thread behind every long emission.
     """
     try:
-        enc = state.encoder
-        if enc is not None and enc.is_connected:
-            return state.encoder_port or last_port
-        port = state.encoder_port or last_port
-        if port:
-            logger.info("Watchdog: retrying %s", port)
-            connect_port(state, port)
-        else:
-            logger.info("Watchdog: auto-detecting (hint ports only)")
-            auto_connect(state, hint_only=True)
-        return state.encoder_port or port
+        # Try-acquire the OUTER emission lock; skip the whole tick if busy.
+        with emission_transaction(blocking=False) as acquired:
+            if not acquired:
+                logger.debug("Watchdog: emission in progress — skipping tick")
+                return last_port
+            enc = state.encoder
+            if enc is not None and enc.is_connected:
+                return state.encoder_port or last_port
+            port = state.encoder_port or last_port
+            if port:
+                logger.info("Watchdog: retrying %s", port)
+                connect_port(state, port)
+            else:
+                logger.info("Watchdog: auto-detecting (hint ports only)")
+                auto_connect(state, hint_only=True)
+            return state.encoder_port or port
     except Exception as exc:
         logger.debug("Watchdog exception: %s", exc)
         return last_port
