@@ -235,6 +235,47 @@ def show_toast(page: ft.Page, message: str, kind: str = "info") -> None:
     )
 
 
+def make_busy_guard(
+    page: ft.Page,
+    button: ft.Control,
+    spinner: ft.Control | None = None,
+) -> Callable[[Callable[[], None]], None]:
+    """Per-handler busy guard for card operations.
+
+    Returns ``run(op)``: while ``op`` executes, the submit button is disabled
+    (and the optional spinner shown); state is restored in ``finally`` even if
+    ``op`` raises. Re-entrant clicks while busy are ignored. This is NOT a
+    cross-service lock — each handler owns its own flag.
+    """
+    busy = {"v": False}
+
+    def run(op: Callable[[], None]) -> None:
+        if busy["v"]:
+            return
+        busy["v"] = True
+        button.disabled = True
+        if spinner is not None:
+            spinner.visible = True
+        page.update()
+        try:
+            op()
+        finally:
+            busy["v"] = False
+            button.disabled = False
+            if spinner is not None:
+                spinner.visible = False
+            page.update()
+
+    return run
+
+
+def op_spinner() -> ft.ProgressRing:
+    """Small inline spinner shown next to a submit button during a card op."""
+    return ft.ProgressRing(
+        width=18, height=18, stroke_width=2, color=theme.GOLD, visible=False,
+    )
+
+
 def confirm_dialog(
     page: ft.Page,
     title: str,

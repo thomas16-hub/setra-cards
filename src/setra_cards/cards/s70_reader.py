@@ -30,24 +30,33 @@ from setra_cards.encoder.protocol import KEY_FF, KEY_TYPE_A, KEY_TYPE_B, TRAILER
 
 logger = logging.getLogger(__name__)
 
+# Only 0x00 has been verified against real lock audit trails (PROTOCOL.md §7).
+# Any other type byte gets a raw-hex label marked "(sin verificar)" — we do
+# NOT invent semantics for unverified bytes (they previously contradicted the
+# card-type convention: 0x20 Laundry, 0x40 Master, 0x80 Setting, 0xC0 Auth).
 EVENT_TYPE_NAMES = {
-    0x00: "Apertura con tarjeta",
-    0x01: "Cierre manual",
-    0x02: "Apertura manual (interior)",
-    0x03: "Intento fallido",
-    0x04: "Tarjeta expirada",
-    0x05: "Tarjeta invalida",
-    0x06: "Bateria baja",
-    0x07: "Deadbolt bloqueado",
-    0x08: "Apertura de emergencia",
-    0x10: "Llave maestra",
-    0x20: "Llave de piso",
-    0x40: "Llave de lavanderia",
-    0x80: "Configuracion",
-    0xC0: "Autorizacion",
+    0x00: "Apertura con tarjeta (0x00)",
 }
 
+
+def event_type_label(event_type: int) -> str:
+    """Operator-facing label for an event type byte (Spanish).
+
+    Always includes the raw hex byte. Unverified types are labeled
+    "Tipo 0xNN (sin verificar)" instead of an invented name.
+    """
+    verified_name = EVENT_TYPE_NAMES.get(event_type)
+    if verified_name is not None:
+        return verified_name
+    return f"Tipo 0x{event_type:02X} (sin verificar)"
+
+
 S70_MARKER = b"FDS70V01"
+
+# Sector 1, block 4, bytes 0-5: system signature = KeyA repeated
+# (PROTOCOL.md §7: "Block 4: [15 95 B8 15 95 B8] [0B] [FF*9]").
+SIGNATURE_BLOCK = 4
+SIGNATURE_LEN = 6
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,9 @@ class S70CardData:
     events: tuple[S70Event, ...]
     sectors_read: int
     raw_blocks: dict[int, bytes] = field(default_factory=dict)
+    sector0_readable: bool = True
+    signature_found: bytes | None = None
+    signature_match: bool | None = None
 
     @property
     def uid_hex(self) -> str:
@@ -99,6 +111,39 @@ class S70CardData:
         if self.collection_date:
             return self.collection_date.strftime("%d/%m/%Y")
         return "—"
+
+    @property
+    def signature_hex(self) -> str:
+        if self.signature_found is None:
+            return "—"
+        return self.signature_found.hex(" ").upper()
+
+    @property
+    def verdict(self) -> str:
+        """Operator-facing verdict (Spanish).
+
+        Distinguishes "sector 0 unreadable" from "marker absent", and
+        appends a signature warning (never a hard fail) when the sector 1
+        system signature does not match this hotel.
+        """
+        if not self.sector0_readable:
+            return "Sector 0 ilegible — no se pudo verificar la marca S70"
+        if not self.is_s70:
+            return (
+                f"Marca FDS70 ausente (sector 0 leido, marca: '{self.marker}') "
+                "— no es una tarjeta S70 Data Card"
+            )
+        if self.signature_match is False:
+            return (
+                "Tarjeta S70 Data Card valida — ADVERTENCIA: la firma de "
+                f"sistema ({self.signature_hex}) no coincide con este hotel"
+            )
+        if self.signature_match is None:
+            return (
+                "Tarjeta S70 Data Card valida — firma de sistema no legible "
+                "(sector 1)"
+            )
+        return "Tarjeta S70 Data Card valida"
 
 
 def _decode_event(block_data: bytes) -> S70Event | None:
@@ -129,7 +174,7 @@ def _decode_event(block_data: bytes) -> S70Event | None:
 
     return S70Event(
         event_type=event_type,
-        event_type_name=EVENT_TYPE_NAMES.get(event_type, f"Tipo 0x{event_type:02X}"),
+        event_type_name=event_type_label(event_type),
         card_uid=card_uid,
         timestamp=timestamp,
         extra=extra,
@@ -193,7 +238,9 @@ def read_s70_card(
     if not raw_blocks:
         return None
 
-    # Decode sector 0 — Identity
+    # Decode sector 0 — Identity. Track readability so the verdict can
+    # distinguish "sector 0 unreadable" from "marker absent".
+    sector0_readable = 0 in raw_blocks
     block0 = raw_blocks.get(0, b"\x00" * 16)
     block1 = raw_blocks.get(1, b"\x00" * 16)
 
@@ -204,7 +251,25 @@ def read_s70_card(
     except Exception:
         marker = ""
 
-    is_s70 = marker.startswith("FDS70")
+    is_s70 = sector0_readable and marker.startswith("FDS70")
+
+    # Sector 1, block 4: system signature (KeyA repeated). Compare against
+    # this hotel's sig.key_a and warn — never hard-fail — on mismatch.
+    sig_block = raw_blocks.get(SIGNATURE_BLOCK)
+    signature_found: bytes | None = None
+    signature_match: bool | None = None
+    if sig_block is not None and len(sig_block) >= SIGNATURE_LEN:
+        signature_found = bytes(sig_block[:SIGNATURE_LEN])
+        signature_match = signature_found == sig.key_a
+        if not signature_match:
+            logger.warning(
+                "S70 system signature mismatch: card has %s, hotel expects %s "
+                "(card likely from another installation)",
+                signature_found.hex(" "), sig.key_a.hex(" "),
+            )
+    else:
+        logger.warning("S70 sector 1 block %d unreadable: cannot verify system signature",
+                       SIGNATURE_BLOCK)
 
     # Block 1: [card_num] [??*4] [YY] [MM] [DD] [building] [floor] [zone] [00] [FF*4]
     card_number = block1[0]
@@ -245,4 +310,7 @@ def read_s70_card(
         events=tuple(events),
         sectors_read=sectors_read,
         raw_blocks=raw_blocks,
+        sector0_readable=sector0_readable,
+        signature_found=signature_found,
+        signature_match=signature_match,
     )

@@ -27,11 +27,13 @@ from setra_cards.services.auth import role_has_access
 from setra_cards.storage.database import init_db
 from setra_cards.ui import theme
 from setra_cards.ui.components import (
-    EmptyState,
+    Badge,
     PageHeader,
     PrimaryButton,
     SecondaryButton,
     SectionCard,
+    make_busy_guard,
+    op_spinner,
     show_toast,
 )
 
@@ -238,8 +240,10 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
 
     days_slider.on_change = on_days_change
 
-    def on_submit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def do_emit() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         if not room_dd.value:
@@ -264,7 +268,7 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 guest = guests_service.get_guest(s, int(guest_dd.value))
 
             result = card_service.create_guest_card(
-                encoder=state.encoder,
+                encoder=enc,
                 hotel=state.hotel,
                 session=s,
                 room=room,
@@ -274,7 +278,13 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 operator=state.operator.name if state.operator else "?",
             )
         _show_card_result(result_host, result)
-        page.update()
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        run_busy(do_emit)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton("Grabar tarjeta", icon=ft.Icons.CREDIT_CARD, on_click=on_submit)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
         title="Tarjeta de huesped",
@@ -286,7 +296,7 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 days_slider,
                 ft.Row([checkout_date, checkout_time], spacing=12),
                 ft.Container(height=14),
-                ft.Row([PrimaryButton("Grabar tarjeta", icon=ft.Icons.CREDIT_CARD, on_click=on_submit)]),
+                ft.Row([submit_btn, spinner], spacing=12),
             ],
             spacing=10,
         ),
@@ -415,8 +425,10 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         update_count()
         page.update()
 
-    def do_emit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def _emit_op() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         staff_name = None
@@ -426,7 +438,7 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 staff_name = match["name"]
         with sf() as s:
             result = card_service.create_laundry_card(
-                encoder=state.encoder,
+                encoder=enc,
                 hotel=state.hotel,
                 session=s,
                 hours=hours_val["v"],
@@ -435,7 +447,14 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 assigned_rooms=sorted(selected_rooms) if selected_rooms else None,
             )
         _show_card_result(result_host, result)
-        page.update()
+
+    def do_emit(e: ft.ControlEvent) -> None:
+        run_busy(_emit_op)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton("Emitir tarjeta limpieza", on_click=do_emit,
+                               icon=ft.Icons.CLEANING_SERVICES_OUTLINED)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     render_rooms_grid()
     update_count()
@@ -488,8 +507,7 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                     expires_display,
                 ], spacing=4),
                 ft.Container(height=12),
-                PrimaryButton("Emitir tarjeta limpieza", on_click=do_emit,
-                              icon=ft.Icons.CLEANING_SERVICES_OUTLINED),
+                ft.Row([submit_btn, spinner], spacing=12),
             ],
             spacing=8,
             tight=True,
@@ -511,8 +529,10 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                             value="23:59",
                             border_radius=theme.INPUT_RADIUS)
 
-    def on_submit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def do_emit() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         try:
@@ -525,12 +545,18 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             return
         with sf() as s:
             result = card_service.create_master_card(
-                encoder=state.encoder, hotel=state.hotel, session=s,
+                encoder=enc, hotel=state.hotel, session=s,
                 valid_until=exp,
                 operator=state.operator.name if state.operator else "?",
             )
         _show_card_result(result_host, result)
-        page.update()
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        run_busy(do_emit)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton("Grabar tarjeta maestra", icon=ft.Icons.KEY, on_click=on_submit)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
         title="Tarjeta maestra (abre todas las habitaciones)",
@@ -538,7 +564,7 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             [
                 ft.Row([exp_date, exp_time], spacing=12),
                 ft.Container(height=12),
-                ft.Row([PrimaryButton("Grabar tarjeta maestra", icon=ft.Icons.KEY, on_click=on_submit)]),
+                ft.Row([submit_btn, spinner], spacing=12),
             ],
             spacing=10,
         ),
@@ -561,8 +587,10 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         expand=True,
     )
 
-    def on_submit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def do_emit() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         if not room_dd.value:
@@ -574,11 +602,17 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 show_toast(page, "Habitacion no encontrada", "error")
                 return
             result = card_service.create_setting_card(
-                encoder=state.encoder, hotel=state.hotel, session=s, room=room,
+                encoder=enc, hotel=state.hotel, session=s, room=room,
                 operator=state.operator.name if state.operator else "?",
             )
         _show_card_result(result_host, result)
-        page.update()
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        run_busy(do_emit)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton("Grabar Setting", icon=ft.Icons.SETTINGS_INPUT_COMPONENT, on_click=on_submit)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
         title="Setting — asignar habitacion a una cerradura",
@@ -589,7 +623,7 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 ft.Container(height=8),
                 room_dd,
                 ft.Container(height=12),
-                ft.Row([PrimaryButton("Grabar Setting", icon=ft.Icons.SETTINGS_INPUT_COMPONENT, on_click=on_submit)]),
+                ft.Row([submit_btn, spinner], spacing=12),
             ],
             spacing=10,
         ),
@@ -609,20 +643,30 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
     }
     title, hint, btn_label, icon = labels[kind]
 
-    def on_submit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def do_emit() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         op = state.operator.name if state.operator else "?"
         with sf() as s:
             if kind == "auth":
-                result = card_service.create_auth_card(encoder=state.encoder, hotel=state.hotel, session=s, operator=op)
+                result = card_service.create_auth_card(encoder=enc, hotel=state.hotel, session=s, operator=op)
             elif kind == "clock":
-                result = card_service.create_clock_card(encoder=state.encoder, hotel=state.hotel, session=s, operator=op)
+                result = card_service.create_clock_card(encoder=enc, hotel=state.hotel, session=s, operator=op)
             else:
-                result = card_service.blank_existing_card(encoder=state.encoder, hotel=state.hotel, session=s, operator=op)
+                # Generic admin blank: intentionally NO expect_card_type — this
+                # button must be able to wipe any card type (Master included).
+                result = card_service.blank_existing_card(encoder=enc, hotel=state.hotel, session=s, operator=op)
         _show_card_result(result_host, result)
-        page.update()
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        run_busy(do_emit)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton(btn_label, icon=icon, on_click=on_submit)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
         title=title,
@@ -630,7 +674,7 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
             [
                 ft.Text(hint, size=12, color=theme.TEXT_MUTED),
                 ft.Container(height=12),
-                ft.Row([PrimaryButton(btn_label, icon=icon, on_click=on_submit)]),
+                ft.Row([submit_btn, spinner], spacing=12),
             ],
             spacing=10,
         ),
@@ -639,24 +683,164 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
 
 # --- Form: Read ---
 
+def _fmt_card_dt(value) -> str:
+    """Format an optional datetime for the diagnostic screen."""
+    return value.strftime("%d/%m/%Y %H:%M") if value else "—"
+
+
+def _estado_banner(estado: str) -> ft.Container:
+    """Prominent GLOBAL/LIGADA banner — the operator's master self-diagnosis.
+
+    Green when the Master/Laundry tail is global (correct), red when the card
+    is bound to a single room (old firmware bug — must be re-issued).
+    """
+    is_global = estado.startswith("GLOBAL")
+    color = theme.SUCCESS if is_global else theme.ERROR
+    icon = ft.Icons.VERIFIED if is_global else ft.Icons.ERROR_OUTLINE
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(icon, size=24, color=color),
+                ft.Text(estado, size=15, weight=ft.FontWeight.W_700, color=color,
+                        expand=True, selectable=True),
+            ],
+            spacing=10,
+        ),
+        padding=ft.Padding(14, 14, 14, 14),
+        bgcolor=theme.SURFACE_ALT,
+        border=ft.Border.all(2, color),
+        border_radius=10,
+    )
+
+
+def _read_problem_badges(info: dict, is_blank: bool) -> list[ft.Control]:
+    """Badges for anything the operator must not miss."""
+    badges: list[ft.Control] = []
+    if is_blank:
+        badges.append(Badge("EN BLANCO", theme.INFO, theme.SURFACE_ALT))
+        return badges
+    if info.get("checksum_valid") is False:
+        badges.append(Badge("CHECKSUM INVALIDO — TARJETA CORRUPTA", "#FFFFFF", theme.ERROR_DARK))
+    if info.get("uid_match") is False:
+        badges.append(Badge("OTRO SISTEMA — UID/DES NO COINCIDE", "#FFFFFF", theme.ERROR_DARK))
+    if info.get("expired") is True:
+        badges.append(Badge("VENCIDA", theme.TEXT_INVERSE, theme.WARNING))
+    return badges
+
+
+def _render_read_result(ok: bool, msg: str, info: dict) -> ft.Control:
+    """Render read_existing_card output as a structured diagnostic panel."""
+    if not ok or not info:
+        return ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER_OUTLINED, size=18, color=theme.WARNING),
+                ft.Text(msg, size=13, weight=ft.FontWeight.W_600, color=theme.WARNING),
+            ],
+            spacing=8,
+        )
+
+    # The service does not expose is_blank in info — infer it from the message.
+    is_blank = "EN BLANCO" in msg
+    has_problem = (
+        info.get("checksum_valid") is False
+        or info.get("uid_match") is False
+        or info.get("expired") is True
+    )
+    header_color = theme.TEXT_MUTED if is_blank else (theme.WARNING if has_problem else theme.SUCCESS)
+    header_icon = ft.Icons.CREDIT_CARD_OFF if is_blank else (
+        ft.Icons.WARNING_AMBER_OUTLINED if has_problem else ft.Icons.CHECK_CIRCLE_OUTLINED
+    )
+
+    controls: list[ft.Control] = [
+        ft.Row(
+            [
+                ft.Icon(header_icon, size=18, color=header_color),
+                ft.Text(msg, size=13, weight=ft.FontWeight.W_600, color=header_color),
+            ],
+            spacing=8,
+        ),
+        ft.Container(height=6),
+        ft.Row(
+            [
+                ft.Text("Tipo:", size=13, color=theme.TEXT_MUTED),
+                ft.Text(str(info.get("tipo") or info.get("card_type_name") or "?"),
+                        size=15, weight=ft.FontWeight.W_700, color=theme.TEXT),
+            ],
+            spacing=8,
+        ),
+    ]
+
+    estado = info.get("estado")
+    if estado:
+        controls.append(ft.Container(height=8))
+        controls.append(_estado_banner(str(estado)))
+
+    badges = _read_problem_badges(info, is_blank)
+    if badges:
+        controls.append(ft.Container(height=8))
+        controls.append(ft.Row(badges, spacing=8, wrap=True))
+
+    if not is_blank:
+        controls.append(ft.Container(height=8))
+        controls.append(
+            ft.Row(
+                [
+                    ft.Text("Valida desde:", size=12, color=theme.TEXT_MUTED),
+                    ft.Text(_fmt_card_dt(info.get("valid_from")), size=12,
+                            weight=ft.FontWeight.W_600, color=theme.TEXT),
+                    ft.Container(width=14),
+                    ft.Text("Vence:", size=12, color=theme.TEXT_MUTED),
+                    ft.Text(_fmt_card_dt(info.get("valid_until")), size=12,
+                            weight=ft.FontWeight.W_600,
+                            color=theme.ERROR if info.get("expired") else theme.TEXT),
+                ],
+                spacing=6,
+                wrap=True,
+            )
+        )
+        if info.get("card_type_name") in ("Guest", "Setting"):
+            controls.append(
+                ft.Text(
+                    f"Edificio {info.get('building')} · Piso {info.get('floor')} · "
+                    f"Hab {info.get('room_no_id')}",
+                    size=12, color=theme.TEXT_MUTED,
+                )
+            )
+
+    detail_bits = [
+        f"UID: {info.get('uid')}" if info.get("uid") else None,
+        f"Firma: {info.get('signature')}" if info.get("signature") else None,
+    ]
+    detail = " · ".join(b for b in detail_bits if b)
+    if detail:
+        controls.append(ft.Container(height=6))
+        controls.append(ft.Text(detail, size=11, color=theme.TEXT_LIGHT, selectable=True))
+
+    return ft.Column(controls, spacing=4, tight=True)
+
+
 def _read_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     state = get_state()
-    output = ft.Text("", size=12, color=theme.TEXT, selectable=True)
+    output_host = ft.Container(
+        content=ft.Text("Sin lectura todavia.", size=12, color=theme.TEXT_LIGHT),
+    )
 
-    def on_submit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def do_read() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
-        ok, msg, info = card_service.read_existing_card(encoder=state.encoder, hotel=state.hotel)
-        lines = [msg]
-        if info:
-            for k, v in info.items():
-                if v is not None:
-                    lines.append(f"  {k}: {v}")
-        output.value = "\n".join(lines)
-        output.color = theme.SUCCESS if ok else theme.WARNING
+        ok, msg, info = card_service.read_existing_card(encoder=enc, hotel=state.hotel)
+        output_host.content = _render_read_result(ok, msg, info)
         result_host.content = None
-        page.update()
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        run_busy(do_read)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton("Leer tarjeta", icon=ft.Icons.SEARCH, on_click=on_submit)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
         title="Leer tarjeta (diagnostico)",
@@ -664,10 +848,10 @@ def _read_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             [
                 ft.Text("Coloca cualquier tarjeta en el encoder para ver su contenido.", size=12, color=theme.TEXT_MUTED),
                 ft.Container(height=12),
-                ft.Row([PrimaryButton("Leer tarjeta", icon=ft.Icons.SEARCH, on_click=on_submit)]),
+                ft.Row([submit_btn, spinner], spacing=12),
                 ft.Container(height=12),
                 ft.Container(
-                    content=output,
+                    content=output_host,
                     padding=ft.Padding(14, 12, 14, 12),
                     bgcolor=theme.SURFACE_ALT,
                     border=ft.Border.all(1, theme.BORDER),
@@ -692,14 +876,16 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         padding=ft.Padding(0, 8, 0, 0),
     )
 
-    def on_submit(e: ft.ControlEvent) -> None:
-        if not state.encoder:
+    def do_read() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         op_name = state.operator.name if state.operator else "?"
         with sf() as s:
             ok, msg, info = card_service.read_s70_data_card(
-                encoder=state.encoder,
+                encoder=enc,
                 hotel=state.hotel,
                 session=s,
                 operator=op_name,
@@ -708,7 +894,6 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             show_toast(page, msg, "error")
             header_info.controls = [ft.Text(msg, size=12, color=theme.ERROR)]
             events_list.controls = []
-            page.update()
             return
 
         # Header
@@ -768,7 +953,13 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             events_list.controls = rows
 
         show_toast(page, msg, "success")
-        page.update()
+
+    def on_submit(e: ft.ControlEvent) -> None:
+        run_busy(do_read)
+
+    spinner = op_spinner()
+    submit_btn = PrimaryButton("Leer S70", icon=ft.Icons.HISTORY_EDU_OUTLINED, on_click=on_submit)
+    run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
         title="S70 Audit Trail — Lectura de eventos de apertura",
@@ -781,7 +972,7 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                     size=12, color=theme.TEXT_MUTED,
                 ),
                 ft.Container(height=8),
-                ft.Row([PrimaryButton("Leer S70", icon=ft.Icons.HISTORY_EDU_OUTLINED, on_click=on_submit)]),
+                ft.Row([submit_btn, spinner], spacing=12),
                 ft.Container(height=12),
                 ft.Container(
                     content=header_info,

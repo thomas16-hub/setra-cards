@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from setra_cards.storage.models import CardLog

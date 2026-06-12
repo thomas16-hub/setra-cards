@@ -1,7 +1,7 @@
 """Administracion — encoder + operadores + backup + updates."""
 from __future__ import annotations
 
-import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -122,7 +122,31 @@ def _encoder_section(page: ft.Page) -> ft.Control:
         status.color = theme.TEXT_MUTED
         page.update()
         ok, msg = encoder_service.auto_connect(state)
+        if ok:
+            # Re-arm auto-reconnect after a manual release (idempotent).
+            encoder_service.start_watchdog(state)
         show_toast(page, msg, "success" if ok else "warning")
+        refresh()
+
+    def do_release(e: ft.ControlEvent) -> None:
+        # Free the COM port so the original Locstar software can use it.
+        if state.encoder is None and not state.encoder_port:
+            show_toast(page, "No hay encoder conectado", "info")
+            return
+        port = state.encoder_port or "?"
+        # Stop the watchdog first: otherwise it re-grabs the port within 30s.
+        encoder_service.stop_watchdog()
+        encoder_service.disconnect(state)
+        sf = init_db()
+        with sf() as s:
+            log_action(s, "encoder_release",
+                       state.operator.name if state.operator else "?", port)
+        show_toast(
+            page,
+            f"Puerto {port} liberado — ya puedes usar el software Locstar. "
+            "Para volver a usar el encoder aqui, presiona 'Detectar automaticamente'.",
+            "success",
+        )
         refresh()
 
     def toggle_show_all(e: ft.ControlEvent) -> None:
@@ -134,6 +158,7 @@ def _encoder_section(page: ft.Page) -> ft.Control:
     return SectionCard(
         title="Encoder USB",
         actions=[
+            SecondaryButton("Liberar puerto", icon=ft.Icons.USB_OFF, on_click=do_release),
             SecondaryButton("Reescanear", icon=ft.Icons.REFRESH, on_click=lambda e: refresh()),
             PrimaryButton("Detectar automaticamente", icon=ft.Icons.AUTO_AWESOME, on_click=do_auto),
         ],
@@ -178,6 +203,9 @@ def _port_row(page: ft.Page, info, is_current: bool, on_done) -> ft.Container:
 
     def use_this(e: ft.ControlEvent) -> None:
         ok, msg = encoder_service.connect_port(state, info.device)
+        if ok:
+            # Re-arm auto-reconnect after a manual release (idempotent).
+            encoder_service.start_watchdog(state)
         show_toast(page, msg, "success" if ok else "error")
         on_done()
 
@@ -427,6 +455,24 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
 
 # --- Backup ---
 
+def _create_backup_file(src: Path, dst: Path) -> None:
+    """Consistent snapshot of a live SQLite DB.
+
+    Uses the SQLite online backup API instead of a filesystem copy: copy2 on
+    a database with open connections can capture a torn (mid-transaction)
+    file. Connection.backup blocks per-page and yields a consistent image.
+    """
+    source = sqlite3.connect(str(src))
+    try:
+        target = sqlite3.connect(str(dst))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
 def _backup_section(page: ft.Page) -> ft.Control:
     state = get_state()
 
@@ -437,7 +483,7 @@ def _backup_section(page: ft.Page) -> ft.Control:
             src = db_path()
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             dst = backups_dir / f"setra-cards_{stamp}.db"
-            shutil.copy2(src, dst)
+            _create_backup_file(src, dst)
             show_toast(page, f"Backup creado: {dst.name}", "success")
             init_db_ref = init_db()
             with init_db_ref() as s:
@@ -560,8 +606,10 @@ def _updates_section(page: ft.Page) -> ft.Control:
         actions=[PrimaryButton("Buscar actualizacion", icon=ft.Icons.REFRESH, on_click=do_check)],
         content=ft.Column([
             ft.Text(
-                "La app se actualiza automaticamente desde GitHub Releases. "
-                "Tambien puedes forzar la busqueda manualmente.",
+                "La app NO se actualiza sola: al iniciar solo verifica si hay una version "
+                "nueva (aviso en el log). Para instalar, presiona 'Buscar actualizacion' y "
+                "confirma. Si el canal de actualizaciones no esta disponible, contacta a "
+                "soporte SETRA.",
                 size=12, color=theme.TEXT_MUTED,
             ),
             ft.Container(height=10),
@@ -592,7 +640,8 @@ def _about_section(page: ft.Page) -> ft.Control:
                 ], spacing=8),
                 ft.Container(height=8),
                 ft.Text(
-                    "Actualizaciones automaticas desde GitHub Releases se configuran en el build final.",
+                    "Las actualizaciones se instalan manualmente desde la seccion "
+                    "'Actualizaciones' de esta pantalla.",
                     size=11, color=theme.TEXT_LIGHT,
                 ),
             ],

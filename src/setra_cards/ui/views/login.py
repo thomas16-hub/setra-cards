@@ -4,7 +4,7 @@ from __future__ import annotations
 import flet as ft
 
 from setra_cards.core.app_state import OperatorSession, get_state
-from setra_cards.services.auth import authenticate, ensure_seed_admin, hash_new_pin, update_pin
+from setra_cards.services.auth import authenticate, ensure_seed_admin, update_pin
 from setra_cards.storage.database import init_db
 from setra_cards.ui import theme
 from setra_cards.ui.components.basics import show_toast
@@ -40,12 +40,12 @@ def build(page: ft.Page) -> ft.Control:
     with sf() as s:
         ensure_seed_admin(s)
         from setra_cards.storage.models import Operator
-        operators = s.query(Operator).filter(Operator.active == True).order_by(Operator.name).all()
+        operators = s.query(Operator).filter(Operator.active.is_(True)).order_by(Operator.name).all()
         op_names = [op.name for op in operators]
         # Solo mostrar hint de credencial default si el Admin aún tiene PIN por defecto
         default_admin = (
             s.query(Operator)
-            .filter(Operator.name == "Admin", Operator.must_change_pin == True)
+            .filter(Operator.name == "Admin", Operator.must_change_pin.is_(True))
             .first()
         )
         show_default_hint = default_admin is not None

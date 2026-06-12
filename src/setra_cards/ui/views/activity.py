@@ -1,7 +1,7 @@
 """Vista Actividad — log unificado (emisiones + acciones admin)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import flet as ft
 
@@ -14,7 +14,6 @@ from setra_cards.ui.components import (
     EmptyState,
     PageHeader,
     SectionCard,
-    show_toast,
     Badge,
 )
 

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import flet as ft
 
 from setra_cards.core.app_state import get_state
+from setra_cards.encoder.protocol import CARD_TYPE_GUEST
 from setra_cards.services import rooms as rooms_service
 from setra_cards.services.action_log import log as log_action
 from setra_cards.services.auth import role_has_access
@@ -22,6 +23,7 @@ from setra_cards.ui.components.basics import (
     SecondaryButton,
     _page_close,
     _page_open,
+    make_busy_guard,
     show_toast,
 )
 
@@ -32,6 +34,22 @@ STATE_LABELS = {
     "mantenimiento":     ("Mantenimiento",   "#8E44AD",        theme.SURFACE_ALT),
     "fuera_de_servicio": ("Fuera servicio",  theme.ERROR,      theme.SURFACE_ALT),
 }
+
+
+def _blank_guest_card_for_checkout(*, encoder, hotel, session, operator):
+    """Physical checkout must only blank GUEST cards.
+
+    A global Master/Laundry card accidentally left on the encoder during a
+    checkout would be wiped silently — expect_card_type makes the service
+    refuse anything that is not a guest card (no force path from checkout).
+    """
+    return blank_existing_card(
+        encoder=encoder,
+        hotel=hotel,
+        session=session,
+        operator=operator,
+        expect_card_type=CARD_TYPE_GUEST,
+    )
 
 
 def build(page: ft.Page) -> ft.Control:
@@ -50,7 +68,7 @@ def build(page: ft.Page) -> ft.Control:
             # Una sola query para todos los CardLog activos
             active_log_rows = s.query(CardLog).filter(
                 CardLog.card_type == "Guest",
-                CardLog.success == True,
+                CardLog.success.is_(True),
                 CardLog.expires_at > now,
             ).all()
 
@@ -296,17 +314,34 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
         _page_close(page, dlg)
         _open_checkin_form(page, room, sf, state, refresh)
 
+    checkout_busy = {"v": False}
+
     def do_checkout(e=None):
         has_encoder = state.encoder is not None
         if has_encoder:
             # Checkout físico: dos pasos — primero borrar tarjeta, luego confirmar DB
             def confirm_physical():
+                # Per-handler busy flag (no cross-service lock).
+                if checkout_busy["v"]:
+                    return
                 _page_close(page, dlg)
+                # Snapshot once: watchdog can clear/replace state.encoder mid-op.
+                enc = state.encoder
+                if enc is None:
+                    show_toast(page, "Encoder no conectado — usa Checkout sin encoder", "error")
+                    return
+                checkout_busy["v"] = True
+                try:
+                    _do_physical_checkout(enc)
+                finally:
+                    checkout_busy["v"] = False
+
+            def _do_physical_checkout(enc):
                 from sqlalchemy import update as sql_update
                 op = state.operator.name if state.operator else "?"
                 with sf() as s:
-                    result = blank_existing_card(
-                        encoder=state.encoder,
+                    result = _blank_guest_card_for_checkout(
+                        encoder=enc,
                         hotel=state.hotel,
                         session=s,
                         operator=op,
@@ -328,7 +363,7 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
                             sql_update(CardLog)
                             .where(
                                 CardLog.room_display == room["display_number"],
-                                CardLog.success == True,
+                                CardLog.success.is_(True),
                                 CardLog.expires_at > now,
                             )
                             .values(expires_at=now)
@@ -368,7 +403,7 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
                             sql_update(CardLog)
                             .where(
                                 CardLog.room_display == room["display_number"],
-                                CardLog.success == True,
+                                CardLog.success.is_(True),
                                 CardLog.expires_at > now,
                             )
                             .values(expires_at=now)
@@ -519,7 +554,7 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         border_radius=theme.INPUT_RADIUS,
     )
 
-    days_display = ft.Text(f"1 noche", size=13, color=theme.GOLD_LIGHT,
+    days_display = ft.Text("1 noche", size=13, color=theme.GOLD_LIGHT,
                            weight=ft.FontWeight.W_600)
     checkout_display = ft.Text(
         (datetime.now() + timedelta(days=1)).replace(hour=h, minute=m).strftime("%d/%m/%Y %H:%M"),
@@ -544,8 +579,10 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
     def do_close(e=None):
         _page_close(page, dlg)
 
-    def do_confirm(e=None):
-        if not state.encoder:
+    def _do_checkin() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         _page_close(page, dlg)
@@ -564,7 +601,7 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         with sf() as s:
             guest = s.get(Guest, guest_id) if guest_id else None
             result = create_guest_card(
-                encoder=state.encoder,
+                encoder=enc,
                 hotel=state.hotel,
                 session=s,
                 room=room_ns,
@@ -581,6 +618,12 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         else:
             show_toast(page, result.error or "Error al emitir tarjeta", "error")
         refresh()
+
+    def do_confirm(e=None):
+        run_busy(_do_checkin)
+
+    emit_btn = PrimaryButton("Emitir tarjeta", on_click=do_confirm, icon=ft.Icons.CREDIT_CARD)
+    run_busy = make_busy_guard(page, emit_btn)
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -610,7 +653,7 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         ),
         actions=[
             ft.TextButton(content=ft.Text("Cancelar"), on_click=do_close),
-            PrimaryButton("Emitir tarjeta", on_click=do_confirm, icon=ft.Icons.CREDIT_CARD),
+            emit_btn,
         ],
         actions_alignment=ft.MainAxisAlignment.END,
         bgcolor=theme.SURFACE,
@@ -667,8 +710,10 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
     def do_close(e=None):
         _page_close(page, dlg)
 
-    def do_confirm(e=None):
-        if not state.encoder:
+    def _do_change_room() -> None:
+        # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
+        enc = state.encoder
+        if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
         new_room_id = int(target_dd.value) if target_dd.value else None
@@ -683,7 +728,7 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
                 show_toast(page, "Habitaciones no encontradas", "error")
                 return
             result = change_guest_room(
-                encoder=state.encoder,
+                encoder=enc,
                 hotel=state.hotel,
                 session=s,
                 old_room=old_r,
@@ -695,6 +740,12 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
         else:
             show_toast(page, result.error or "Error al cambiar habitacion", "error")
         refresh()
+
+    def do_confirm(e=None):
+        run_busy(_do_change_room)
+
+    rewrite_btn = PrimaryButton("Reescribir tarjeta", on_click=do_confirm, icon=ft.Icons.SWAP_HORIZ)
+    run_busy = make_busy_guard(page, rewrite_btn)
 
     dlg = ft.AlertDialog(
         modal=True,
@@ -740,7 +791,7 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
         ),
         actions=[
             ft.TextButton(content=ft.Text("Cancelar"), on_click=do_close),
-            PrimaryButton("Reescribir tarjeta", on_click=do_confirm, icon=ft.Icons.SWAP_HORIZ),
+            rewrite_btn,
         ],
         actions_alignment=ft.MainAxisAlignment.END,
         bgcolor=theme.SURFACE,
@@ -750,7 +801,13 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
 
 
 def _open_confirm(page, title: str, message: str, on_confirm) -> None:
+    fired = {"v": False}
+
     def do_ok(e=None):
+        # Fire-once: a double-click must not run on_confirm twice.
+        if fired["v"]:
+            return
+        fired["v"] = True
         _page_close(page, dlg)
         on_confirm()
 

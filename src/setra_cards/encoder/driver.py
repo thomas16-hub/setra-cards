@@ -24,17 +24,28 @@ from setra_cards.encoder.protocol import (
 
 logger = logging.getLogger(__name__)
 
+# Expected total RX frame lengths (<LEN> byte included) for known commands.
+ACK_FRAME_LEN = 2            # <01> <status>
+ANTICOLLISION_FRAME_LEN = 6  # <05> <status> <uid:4>
+SELECT_FRAME_LEN = 3         # <02> <status> <sak>
+READ_FRAME_LEN = 18          # <11> <status> <data:16>
+
 
 class EncoderError(Exception):
     """Raised when encoder communication fails."""
 
 
-def scan_encoder_ports(baud: int = 9600, timeout: float = 0.8) -> list[str]:
-    """Scan all available COM ports and return those that respond to a BEEP command.
+def scan_encoder_ports(
+    baud: int = 9600, timeout: float = 0.8, ports: list[str] | None = None
+) -> list[str]:
+    """Scan COM ports and return those that respond to a BEEP command.
 
     Sends CMD_BEEP (01 06) and checks for ACK (01 00).
     Probes all ports in parallel so total time is ~1 timeout instead of N×timeout.
     Returns list of matching port names in original port order.
+
+    ports: optional explicit list of port names to probe. When None, every
+    COM port on the system is probed (full scan — explicit user action only).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -42,8 +53,9 @@ def scan_encoder_ports(baud: int = 9600, timeout: float = 0.8) -> list[str]:
 
     from setra_cards.encoder.protocol import CMD_BEEP
 
-    ports = [p.device for p in list_comports()]
-    logger.info("Escaneando %d puertos COM para encoder Locstar: %s", len(ports), ports)
+    if ports is None:
+        ports = [p.device for p in list_comports()]
+    logger.info("Scanning %d COM ports for Locstar encoder: %s", len(ports), ports)
 
     if not ports:
         return []
@@ -58,11 +70,11 @@ def scan_encoder_ports(baud: int = 9600, timeout: float = 0.8) -> list[str]:
                 time.sleep(0.15)
                 resp = s.read(s.in_waiting or 8)
                 if len(resp) >= 2 and resp[0] == 0x01 and resp[1] == 0x00:
-                    logger.info("Encoder detectado en %s (resp: %s)", port, resp.hex(" "))
+                    logger.info("Encoder detected on %s (resp: %s)", port, resp.hex(" "))
                     return port
-                logger.debug("Puerto %s no respondio como encoder (resp: %s)", port, resp.hex(" ") if resp else "vacio")
+                logger.debug("Port %s did not respond as encoder (resp: %s)", port, resp.hex(" ") if resp else "empty")
         except (serial.SerialException, OSError) as e:
-            logger.debug("Puerto %s no disponible: %s", port, e)
+            logger.debug("Port %s not available: %s", port, e)
         return None
 
     found: list[str] = []
@@ -77,9 +89,14 @@ def scan_encoder_ports(baud: int = 9600, timeout: float = 0.8) -> list[str]:
     return sorted(found, key=lambda p: ports.index(p))
 
 
-def detect_encoder_port(baud: int = 9600, timeout: float = 0.8) -> str | None:
-    """Return the first COM port with a Locstar encoder, or None."""
-    found = scan_encoder_ports(baud, timeout)
+def detect_encoder_port(
+    baud: int = 9600, timeout: float = 0.8, ports: list[str] | None = None
+) -> str | None:
+    """Return the first COM port with a Locstar encoder, or None.
+
+    ports: optional explicit list of port names to probe (None = all ports).
+    """
+    found = scan_encoder_ports(baud, timeout, ports=ports)
     return found[0] if found else None
 
 
@@ -101,7 +118,7 @@ class EncoderDriver:
             self._ser = serial.Serial(self._port, self._baud, timeout=self._timeout)
             self._ser.reset_input_buffer()
             time.sleep(0.3)
-            logger.info("Encoder abierto en %s @ %d", self._port, self._baud)
+            logger.info("Encoder opened on %s @ %d", self._port, self._baud)
 
     def close(self) -> None:
         """Close serial port."""
@@ -109,7 +126,7 @@ class EncoderDriver:
             if self._ser and self._ser.is_open:
                 self._ser.close()
                 self._ser = None
-                logger.info("Encoder cerrado")
+                logger.info("Encoder closed")
 
     @property
     def is_open(self) -> bool:
@@ -117,14 +134,20 @@ class EncoderDriver:
 
     @property
     def is_connected(self) -> bool:
-        """Check if the serial port is still open and responsive."""
-        try:
-            if self._ser is None or not self._ser.is_open:
+        """Check if the serial port is still open and responsive (thread-safe).
+
+        Takes the driver lock so the probe never races a serial operation,
+        and snapshots the handle so a concurrent close cannot None it mid-check.
+        """
+        with self._lock:
+            ser = self._ser
+            try:
+                if ser is None or not ser.is_open:
+                    return False
+                ser.in_waiting  # noqa: B018 — probes port status
+                return True
+            except (serial.SerialException, OSError, AttributeError):
                 return False
-            self._ser.in_waiting  # noqa: B018 — probes port status
-            return True
-        except (serial.SerialException, OSError):
-            return False
 
     def _send(self, data: bytes, wait: float = 0.08, read_size: int = 0) -> bytes:
         """Send bytes and read response. Must be called with lock held.
@@ -144,7 +167,12 @@ class EncoderDriver:
             self._ser.flush()
             if read_size:
                 # Blocking read: waits until exactly read_size bytes arrive (or timeout)
-                return self._ser.read(read_size)
+                resp = self._ser.read(read_size)
+                if len(resp) < read_size:
+                    # Short read (timeout): drain once so a late frame is not
+                    # misread as the reply to the next command.
+                    self._drain_input()
+                return resp
             # Poll for response: check every 10ms, up to max wait
             deadline = time.monotonic() + wait
             while time.monotonic() < deadline:
@@ -154,7 +182,13 @@ class EncoderDriver:
                     time.sleep(0.030)
                     break
                 time.sleep(0.01)
-            return self._ser.read(self._ser.in_waiting or 256)
+            available = self._ser.in_waiting
+            if not available:
+                # Timeout: fast-fail instead of a blocking read(256), and drain
+                # once so a late frame cannot ACK the next command.
+                self._drain_input()
+                return b""
+            return self._ser.read(available)
         except (serial.SerialException, OSError) as e:
             # USB unplugged mid-operation: close the port so is_connected returns False
             logger.warning("Serial port lost during operation: %s — closing port", e)
@@ -174,20 +208,36 @@ class EncoderDriver:
         return resp
 
     @staticmethod
-    def _ok(resp: bytes) -> bool:
-        return len(resp) >= 2 and resp[1] == 0x00
+    def _frame_valid(resp: bytes, expected_len: int | None = None) -> bool:
+        """Validate RX framing: <LEN><STATUS>[DATA], LEN == bytes after it.
+
+        A stale/late frame (e.g. a leftover 18-byte read reply) would fail this
+        check instead of being misread as the ACK for the current command.
+        expected_len: total frame length when the reply size is known.
+        """
+        if len(resp) < 2:
+            return False
+        if resp[0] != len(resp) - 1:
+            return False
+        if expected_len is not None and len(resp) != expected_len:
+            return False
+        return True
 
     @staticmethod
-    def _write_ok(resp: bytes) -> bool:
-        """Write can return 01 00 or 01 01, both success."""
-        return len(resp) >= 2 and resp[1] in (0x00, 0x01)
+    def _ok(resp: bytes, expected_len: int | None = None) -> bool:
+        return EncoderDriver._frame_valid(resp, expected_len) and resp[1] == 0x00
+
+    @staticmethod
+    def _write_ok(resp: bytes, expected_len: int | None = None) -> bool:
+        """Write can return 01 00 or 01 01, both success (documented acks)."""
+        return EncoderDriver._frame_valid(resp, expected_len) and resp[1] in (0x00, 0x01)
 
     # --- Public API (thread-safe) ---
 
     def beep(self) -> bool:
         try:
             with self._lock:
-                return self._ok(self._send_checked("Beep", CMD_BEEP))
+                return self._ok(self._send_checked("Beep", CMD_BEEP), expected_len=ACK_FRAME_LEN)
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in beep: %s", e)
             return False
@@ -202,12 +252,12 @@ class EncoderDriver:
                 atqa = r[2:4]
 
                 r = self._send(CMD_ANTICOLLISION)
-                if not self._ok(r) or len(r) < 6:
+                if not self._ok(r, expected_len=ANTICOLLISION_FRAME_LEN):
                     return None
                 uid = r[2:6]
 
                 r = self._send(CMD_SELECT)
-                if not self._ok(r) or len(r) < 3:
+                if not self._ok(r, expected_len=SELECT_FRAME_LEN):
                     return None
                 sak = r[2]
 
@@ -221,19 +271,23 @@ class EncoderDriver:
                 pass
             return None
 
-    def _reset_on_error(self) -> None:
-        """Best-effort buffer flush after serial error."""
+    def _drain_input(self) -> None:
+        """Best-effort discard of pending RX bytes (stale/late frames)."""
         try:
             if self._ser and self._ser.is_open:
                 self._ser.reset_input_buffer()
         except Exception:
             pass
 
+    def _reset_on_error(self) -> None:
+        """Best-effort buffer flush after serial error."""
+        self._drain_input()
+
     def load_key(self, key_type: int, sector: int, key: bytes) -> bool:
         try:
             with self._lock:
                 cmd = bytes([0x09, 0x06, key_type, sector]) + key
-                return self._ok(self._send(cmd))
+                return self._ok(self._send(cmd), expected_len=ACK_FRAME_LEN)
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in load_key: %s", e)
             self._reset_on_error()
@@ -244,7 +298,7 @@ class EncoderDriver:
             with self._lock:
                 first_block = sector * 4
                 cmd = bytes([0x04, 0x05, key_type, sector, first_block])
-                return self._ok(self._send(cmd))
+                return self._ok(self._send(cmd), expected_len=ACK_FRAME_LEN)
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in auth_sector: %s", e)
             self._reset_on_error()
@@ -253,11 +307,24 @@ class EncoderDriver:
     def read_block(self, block: int) -> bytes | None:
         try:
             with self._lock:
-                # read_size=18: blocking read ensures full 18-byte frame arrives
-                # (18 bytes at 9600 baud = 18.75ms; fast poll would only capture partial frame)
-                r = self._send(bytes([0x02, 0x08, block]), read_size=18)
-                if self._ok(r) and len(r) >= 18:
-                    return r[2:18]
+                # Staged read: an error reply is only 2 bytes (<LEN><STATUS>),
+                # so a blocking read(18) would stall a full serial timeout on
+                # every failed read. Read LEN+STATUS first, then the remaining
+                # 16 data bytes only on success (STATUS == 0x00 and LEN == 0x11).
+                head = self._send(bytes([0x02, 0x08, block]), read_size=2)
+                if len(head) < 2:
+                    return None
+                if head[1] != 0x00 or head[0] != READ_FRAME_LEN - 1:
+                    # Error status or malformed length — discard trailing bytes.
+                    logger.debug("read_block(%d) error frame: %s", block, head.hex(" "))
+                    self._drain_input()
+                    return None
+                body = self._ser.read(READ_FRAME_LEN - 2) if self._ser else b""
+                frame = head + body
+                if self._ok(frame, expected_len=READ_FRAME_LEN) and len(frame) >= READ_FRAME_LEN:
+                    return frame[2:READ_FRAME_LEN]
+                logger.debug("read_block(%d) short/invalid frame: %s", block, frame.hex(" "))
+                self._drain_input()
                 return None
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in read_block: %s", e)
@@ -270,7 +337,7 @@ class EncoderDriver:
         try:
             with self._lock:
                 cmd = bytes([0x12, 0x09, block]) + data
-                return self._write_ok(self._send(cmd))
+                return self._write_ok(self._send(cmd), expected_len=ACK_FRAME_LEN)
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in write_block: %s", e)
             self._reset_on_error()
@@ -279,7 +346,7 @@ class EncoderDriver:
     def halt(self) -> bool:
         try:
             with self._lock:
-                return self._ok(self._send(CMD_HALT))
+                return self._ok(self._send(CMD_HALT), expected_len=ACK_FRAME_LEN)
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in halt: %s", e)
             self._reset_on_error()
