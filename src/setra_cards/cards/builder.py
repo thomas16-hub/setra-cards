@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from setra_cards.cards.crypto import (
     SystemSignature,
     make_auth_trailer,
-    make_block44,
     make_trailer,
     xor_checksum,
 )
@@ -26,22 +25,26 @@ from setra_cards.encoder.protocol import (
 
 @dataclass(frozen=True)
 class CardData:
-    """Complete card data for sector write (4 blocks of 16 bytes each)."""
+    """Complete card data for sector write (4 blocks of 16 bytes each).
+
+    Block 44 is built in the writer via crypto.make_block44 with the
+    hotel's explicit DES key (no default-key shortcut here).
+    """
 
     card_type: int
     block45: bytes
     block46: bytes
     trailer: bytes
 
-    def build_block44(self, uid: bytes, building: int = 1, des_key: bytes | None = None) -> bytes:
-        """Build block 44 from card UID (DES-encrypted)."""
-        from setra_cards.encoder.protocol import DES_KEY as _DEFAULT_KEY
-        key = des_key if des_key is not None else _DEFAULT_KEY
-        return make_block44(uid, des_key=key, building=building)
-
 
 def make_date_bytes(dt: datetime) -> bytes:
-    """Encode datetime as [YY, MM, DD, HH, MM] (5 bytes, decimal values)."""
+    """Encode datetime as [YY, MM, DD, HH, MM] (5 bytes, decimal values).
+
+    The protocol stores the year as a single byte offset from 2000,
+    so only years 2000-2099 are representable.
+    """
+    if dt.year < 2000 or dt.year > 2099:
+        raise ValueError("El año debe estar entre 2000 y 2099")
     return bytes([dt.year - 2000, dt.month, dt.day, dt.hour, dt.minute])
 
 
@@ -169,8 +172,6 @@ def build_master_card(
     now: datetime,
     expire: datetime,
     sig: SystemSignature,
-    building: int = 1,
-    floor: int = 1,
 ) -> CardData:
     """Build Master card (0x40) — abre TODAS las cerraduras del sistema.
 
@@ -200,8 +201,6 @@ def build_laundry_card(
     now: datetime,
     expire: datetime,
     sig: SystemSignature,
-    building: int = 1,
-    floor: int = 1,
 ) -> CardData:
     """Build Laundry/Housekeeping card (0x20) — abre todas las cerraduras del sistema.
 

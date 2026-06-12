@@ -1,13 +1,18 @@
-"""Auto-updater — consulta GitHub Releases y aplica actualizaciones.
+"""Updater — queries GitHub Releases and applies updates.
 
-Flujo:
-1. Al arrancar o cuando el usuario pulsa "Buscar actualizacion":
+Updates are NOT fully automatic: installing always requires the operator to
+press "Buscar actualizacion" (or "Instalar ahora") in the Admin view. At
+startup, main() runs a best-effort, non-blocking check that only LOGS when a
+new version is available — it never downloads or installs on its own.
+
+Flow:
+1. Startup check (log-only) or operator presses "Buscar actualizacion":
    - GET https://api.github.com/repos/thomas16-hub/setra-cards/releases/latest
-   - Extrae `tag_name` (ej. v2.1.0) y el asset .zip
-2. Si la version es mayor que __version__:
-   - Descarga el ZIP a temp
-   - Verifica hash si esta disponible en release body
-   - Lanza apply_update.bat que cierra la app, reemplaza archivos y relanza
+   - Extracts `tag_name` (e.g. v2.1.0) and the .zip asset
+2. If the version is newer than __version__ and the operator confirms:
+   - Downloads the ZIP to temp
+   - Verifies the SHA-256 published in the release body (mandatory)
+   - Launches apply_update.bat which closes the app, swaps files and relaunches
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -112,8 +118,21 @@ def check_for_update() -> CheckResult:
         )
         has = _parse_version(latest.version) > _parse_version(__version__)
         return CheckResult(__version__, latest, has)
+    except urllib.error.HTTPError as exc:
+        # Keep the raw error in the log; never show "HTTP Error 404" to the operator.
+        logger.warning("GitHub releases check failed: HTTP %s — %s", exc.code, exc)
+        if exc.code in (403, 404):
+            # Repo went private — anonymous API calls now return 404/403.
+            # TODO: migrate the update channel to portonsabaneta.com/setra-cards/
+            # with an Ed25519-signed manifest (same scheme as locstar-app);
+            # deferred — needs infra decisions.
+            return CheckResult(
+                __version__, None, False,
+                error="Canal de actualización no disponible — contactar a soporte SETRA",
+            )
+        return CheckResult(__version__, None, False, error=str(exc))
     except Exception as exc:
-        logger.warning("Error consultando GitHub: %s", exc)
+        logger.warning("GitHub releases check failed: %s", exc)
         return CheckResult(__version__, None, False, error=str(exc))
 
 
@@ -121,6 +140,38 @@ def _install_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parents[3]
+
+
+# Per-PC identity and secrets must NEVER be clobbered nor redistributed by an
+# update payload: `hoteles/` carries the keys of ALL hotels (the release ZIP
+# ships it for the installer only), `hotel.json` + `.installed` are this PC's
+# identity, and installer artifacts are not runtime files.
+ROBOCOPY_EXCLUDE_DIRS = ("hoteles", "drivers", "config", "data", ".browser-profile")
+ROBOCOPY_EXCLUDE_FILES = ("Instalar.bat", "Desinstalar.bat", "LEEME.txt", "hotel.json", ".installed")
+
+
+def _build_update_bat_script(payload_dir: Path, install_dir: Path, exe_name: str, staging: Path) -> str:
+    """Build the apply_update.bat content (extracted for testability)."""
+    xd = " ".join(ROBOCOPY_EXCLUDE_DIRS)
+    xf = " ".join(ROBOCOPY_EXCLUDE_FILES)
+    return (
+        "@echo off\r\n"
+        "chcp 65001 >nul 2>&1\r\n"
+        "title Setra CARDS - Actualizando\r\n"
+        "echo Aplicando actualizacion...\r\n"
+        "timeout /t 3 /nobreak >nul\r\n"
+        f'taskkill /F /IM "{exe_name}" >nul 2>&1\r\n'
+        "timeout /t 2 /nobreak >nul\r\n"
+        f'robocopy "{payload_dir}" "{install_dir}" /E /XD {xd} /XF {xf} /NFL /NDL /NJH /NJS /NP >nul\r\n'
+        "if errorlevel 8 (\r\n"
+        "  echo ERROR aplicando actualizacion. Revisa el log.\r\n"
+        "  pause\r\n"
+        "  exit /b 1\r\n"
+        ")\r\n"
+        f'start "" "{install_dir}\\{exe_name}"\r\n'
+        f'rmdir /S /Q "{staging}" >nul 2>&1\r\n'
+        "exit /b 0\r\n"
+    )
 
 
 def apply_update(info: UpdateInfo) -> None:
@@ -180,22 +231,7 @@ def apply_update(info: UpdateInfo) -> None:
 
     bat = staging / "apply_update.bat"
     bat.write_text(
-        "@echo off\r\n"
-        "chcp 65001 >nul 2>&1\r\n"
-        "title Setra CARDS - Actualizando\r\n"
-        "echo Aplicando actualizacion...\r\n"
-        "timeout /t 3 /nobreak >nul\r\n"
-        f'taskkill /F /IM "{exe_name}" >nul 2>&1\r\n'
-        "timeout /t 2 /nobreak >nul\r\n"
-        f'robocopy "{payload_dir}" "{install_dir}" /E /XD config data .browser-profile /NFL /NDL /NJH /NJS /NP >nul\r\n'
-        "if errorlevel 8 (\r\n"
-        "  echo ERROR aplicando actualizacion. Revisa el log.\r\n"
-        "  pause\r\n"
-        "  exit /b 1\r\n"
-        ")\r\n"
-        f'start "" "{install_dir}\\{exe_name}"\r\n'
-        f'rmdir /S /Q "{staging}" >nul 2>&1\r\n'
-        "exit /b 0\r\n",
+        _build_update_bat_script(payload_dir, install_dir, exe_name, staging),
         encoding="utf-8",
     )
 

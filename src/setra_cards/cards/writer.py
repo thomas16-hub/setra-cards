@@ -10,8 +10,11 @@ from dataclasses import dataclass
 
 from setra_cards.cards.builder import CardData
 from setra_cards.cards.crypto import SystemSignature, make_block44
+from setra_cards.cards.reader import DecodedCard, read_card
 from setra_cards.encoder.driver import EncoderDriver
 from setra_cards.encoder.protocol import (
+    CARD_TYPE_LAUNDRY,
+    CARD_TYPE_MASTER,
     DEFAULT_TRAILER,
     DES_KEY,
     KEY_FF,
@@ -22,6 +25,13 @@ from setra_cards.encoder.protocol import (
 
 logger = logging.getLogger(__name__)
 
+# Global Master/Laundry cards MUST keep tail bytes 12-15 = 00 00 00 00
+# (the lock firmware identifies them by card_type, not room_no_id).
+GLOBAL_TAIL = b"\x00\x00\x00\x00"
+
+# Operator-facing error when a different card is detected mid-write.
+CARD_SWAPPED_ERROR = "La tarjeta cambió durante la grabación"
+
 
 @dataclass(frozen=True)
 class WriteResult:
@@ -31,11 +41,16 @@ class WriteResult:
 
 
 def _auth_keys_standard(sig: SystemSignature) -> list[tuple[str, bytes, int]]:
-    """Key attempts for Clock/Setting/Guest cards."""
+    """Key attempts for Clock/Setting/Guest cards.
+
+    Sig-A first: on a re-issued (system-trailer) card it is the working key,
+    so trying it first avoids two doomed KeyA attempts per block. Blank cards
+    simply fall through to FF-A/FF-B.
+    """
     return [
-        ("FF-A", KEY_FF, KEY_TYPE_A),
         ("Sig-A", sig.key_a, KEY_TYPE_A),
         ("TrailerB-B", TRAILER_KEY_B, KEY_TYPE_B),
+        ("FF-A", KEY_FF, KEY_TYPE_A),
         ("FF-B", KEY_FF, KEY_TYPE_B),
     ]
 
@@ -53,16 +68,32 @@ def _write_blocks_with_keys(
     sector: int,
     blocks: list[tuple[int, bytes, str]],
     key_list: list[tuple[str, bytes, int]],
+    original_uid: bytes | None = None,
 ) -> tuple[bool, str]:
-    """Escribe los 4 bloques. Por bloque prueba cada key hasta conseguir
-    auth+write exitosos. Retorna (ok, error_detail)."""
+    """Write the 4 blocks. Per block, try each key until auth+write succeed.
+
+    If original_uid is given, every re-detect checks the UID still matches;
+    a different card mid-write aborts everything with CARD_SWAPPED_ERROR.
+    Returns (ok, error_detail).
+    """
+
+    def _uid_changed() -> bool:
+        detection = encoder.detect_card()
+        return (
+            original_uid is not None
+            and detection is not None
+            and detection.uid != original_uid
+        )
+
     for block_num, data, name in blocks:
-        encoder.detect_card()
+        if _uid_changed():
+            return False, CARD_SWAPPED_ERROR
         written = False
         last_err = ""
         for key_name, key, kt in key_list:
             encoder.load_key(kt, sector, key)
-            encoder.detect_card()
+            if _uid_changed():
+                return False, CARD_SWAPPED_ERROR
             if not encoder.auth_sector(sector, kt):
                 last_err = f"auth {key_name} FAIL"
                 continue
@@ -71,10 +102,64 @@ def _write_blocks_with_keys(
                 written = True
                 break
             last_err = f"auth {key_name} OK pero write FAIL"
-            encoder.detect_card()
+            if _uid_changed():
+                return False, CARD_SWAPPED_ERROR
         if not written:
             return False, f"{name}: {last_err}"
     return True, ""
+
+
+def _verify_decoded(
+    decoded: DecodedCard | None,
+    expected_uid: bytes,
+    expected_card_type: int,
+    sector: int,
+) -> str | None:
+    """Validate a read-back card against what was just written.
+
+    Returns an operator-facing (Spanish) error message, or None if the
+    verification passes.
+    """
+    if (
+        decoded is None
+        or decoded.uid != expected_uid
+        or not decoded.uid_match
+        or not decoded.checksum_valid
+        or decoded.card_type != expected_card_type
+    ):
+        return "Verificación falló: la tarjeta no se grabó correctamente"
+    if expected_card_type in (CARD_TYPE_MASTER, CARD_TYPE_LAUNDRY):
+        block45 = decoded.raw_blocks.get(sector * 4 + 1)
+        if block45 is None or block45[12:16] != GLOBAL_TAIL:
+            return "Verificación falló: tail maestra/limpieza incorrecto"
+    return None
+
+
+def _verify_after_write(
+    encoder: EncoderDriver,
+    sector: int,
+    sig: SystemSignature,
+    des_key: bytes,
+    card: CardData,
+    expected_uid: bytes,
+) -> str | None:
+    """Read the card back and verify it matches what was written.
+
+    Returns an operator-facing error message, or None on success.
+    """
+    encoder.halt()
+    try:
+        decoded = read_card(encoder, sector, sig, des_key=des_key)
+    except Exception:
+        logger.exception("Read-back verification raised unexpectedly")
+        return "Verificación falló: la tarjeta no se grabó correctamente"
+    error = _verify_decoded(decoded, expected_uid, card.card_type, sector)
+    if error:
+        logger.warning(
+            "Post-write verification failed for UID=%s: %s",
+            expected_uid.hex(":"), error,
+        )
+    return error
 
 
 def write_card(
@@ -93,7 +178,7 @@ def write_card(
     """
     detection = encoder.detect_card()
     if not detection:
-        return WriteResult(success=False, error="No card detected")
+        return WriteResult(success=False, error="No se detectó ninguna tarjeta")
 
     uid = detection.uid
     block44 = make_block44(uid, des_key=des_key, building=building)
@@ -111,28 +196,40 @@ def write_card(
         (sector * 4 + 3, card.trailer, "trailer"),
     ]
 
-    # Intento 1: write directo
-    ok, err = _write_blocks_with_keys(encoder, sector, blocks, key_list)
+    # Attempt 1: direct write
+    ok, err = _write_blocks_with_keys(encoder, sector, blocks, key_list, original_uid=uid)
 
-    # Intento 2: si fallo, hacer blank y reintentar
+    # A swapped card must never trigger auto-blank (it would erase the wrong card)
+    if not ok and err == CARD_SWAPPED_ERROR:
+        return WriteResult(success=False, uid=uid, error=CARD_SWAPPED_ERROR)
+
+    # Attempt 2: on failure, blank the sector and retry once
     if not ok:
-        logger.info("Write fallo (%s). Intentando auto-blank + rewrite...", err)
+        logger.info("Write failed (%s). Trying auto-blank + rewrite...", err)
         blank_res = blank_card(encoder, sector)
         if not blank_res.success:
             return WriteResult(
                 success=False, uid=uid,
                 error=f"No se pudo escribir ni borrar la tarjeta: {err} / blank: {blank_res.error}",
             )
-        # Tras blank, la tarjeta tiene keys FF — reintentar con key_list entero
-        ok, err = _write_blocks_with_keys(encoder, sector, blocks, key_list)
+        # After blank the card has FF keys — retry with the full key list
+        ok, err = _write_blocks_with_keys(encoder, sector, blocks, key_list, original_uid=uid)
         if not ok:
+            if err == CARD_SWAPPED_ERROR:
+                return WriteResult(success=False, uid=uid, error=CARD_SWAPPED_ERROR)
             return WriteResult(
                 success=False, uid=uid,
                 error=f"Write fallo incluso tras auto-blank: {err}",
             )
-        logger.info("Auto-blank + rewrite exitoso tras fallo inicial")
+        logger.info("Auto-blank + rewrite succeeded after initial failure")
 
-    logger.info("Card programmed OK: UID=%s", uid.hex(":"))
+    # Read-back verification: never report success on a card that did not
+    # actually take the data (or kept a stale tail on master/laundry).
+    verify_error = _verify_after_write(encoder, sector, sig, des_key, card, uid)
+    if verify_error:
+        return WriteResult(success=False, uid=uid, error=verify_error)
+
+    logger.info("Card programmed and verified OK: UID=%s", uid.hex(":"))
     encoder.halt()
     encoder.beep()
     time.sleep(0.12)
@@ -140,11 +237,25 @@ def write_card(
     return WriteResult(success=True, uid=uid)
 
 
+def _auth_with_any_key(
+    encoder: EncoderDriver,
+    sector: int,
+    key_attempts: list[tuple[str, bytes, int]],
+) -> bool:
+    """Try each key (re-detecting before auth) until one authenticates."""
+    for _key_name, key, kt in key_attempts:
+        encoder.load_key(kt, sector, key)
+        encoder.detect_card()
+        if encoder.auth_sector(sector, kt):
+            return True
+    return False
+
+
 def blank_card(encoder: EncoderDriver, sector: int) -> WriteResult:
     """Restore card sector to blank state (zeros + default trailer)."""
     detection = encoder.detect_card()
     if not detection:
-        return WriteResult(success=False, error="No card detected")
+        return WriteResult(success=False, error="No se detectó ninguna tarjeta")
     uid = detection.uid
     encoder.halt()
     encoder.beep()
@@ -157,49 +268,50 @@ def blank_card(encoder: EncoderDriver, sector: int) -> WriteResult:
         ("FF-A", KEY_FF, KEY_TYPE_A),
     ]
 
-    authed = False
-    for key_name, key, kt in key_attempts:
-        encoder.load_key(kt, sector, key)
-        encoder.detect_card()
-        if encoder.auth_sector(sector, kt):
-            authed = True
-            break
-
-    if not authed:
-        return WriteResult(success=False, uid=uid, error="Auth failed — no key worked")
+    if not _auth_with_any_key(encoder, sector, key_attempts):
+        return WriteResult(
+            success=False, uid=uid,
+            error="No se pudo autenticar la tarjeta: ninguna llave funcionó",
+        )
 
     # Blank data blocks (0-2) — re-auth before each block write
     zeros = bytes(16)
     for i in range(3):
         block = sector * 4 + i
         encoder.detect_card()
-        block_authed = False
-        for key_name, key, kt in key_attempts:
-            encoder.load_key(kt, sector, key)
-            encoder.detect_card()
-            if encoder.auth_sector(sector, kt):
-                block_authed = True
-                break
-        if not block_authed:
-            return WriteResult(success=False, uid=uid, error=f"Auth failed before blanking block {block}")
+        if not _auth_with_any_key(encoder, sector, key_attempts):
+            return WriteResult(
+                success=False, uid=uid,
+                error=f"Fallo de autenticación antes de borrar el bloque {block}",
+            )
         if not encoder.write_block(block, zeros):
-            return WriteResult(success=False, uid=uid, error=f"Write failed for block {block}")
+            return WriteResult(
+                success=False, uid=uid,
+                error=f"Fallo de escritura al borrar el bloque {block}",
+            )
 
-    # Restore default trailer
-    encoder.detect_card()
-    trailer_authed = False
-    for key_name, key, kt in key_attempts:
-        encoder.load_key(kt, sector, key)
-        encoder.detect_card()
-        if encoder.auth_sector(sector, kt):
-            trailer_authed = True
-            break
-
+    # Restore default trailer — a failure here leaves the data blocks zeroed
+    # with a non-default trailer (dead card), so retry once before giving up.
     trailer_block = sector * 4 + 3
-    if not trailer_authed:
-        return WriteResult(success=False, uid=uid, error="Auth failed before trailer restore — data blocks blanked but trailer unchanged")
-    if not encoder.write_block(trailer_block, DEFAULT_TRAILER):
-        return WriteResult(success=False, uid=uid, error="Trailer write failed — data blocks blanked")
+    trailer_restored = False
+    for attempt in (1, 2):
+        encoder.detect_card()
+        if not _auth_with_any_key(encoder, sector, key_attempts):
+            logger.warning("Trailer restore attempt %d: auth failed", attempt)
+            continue
+        if encoder.write_block(trailer_block, DEFAULT_TRAILER):
+            trailer_restored = True
+            break
+        logger.warning("Trailer restore attempt %d: write failed", attempt)
+
+    if not trailer_restored:
+        return WriteResult(
+            success=False, uid=uid,
+            error=(
+                "No se pudo restaurar el trailer tras borrar los datos "
+                "(reintento agotado). Vuelva a intentar el borrado con la misma tarjeta."
+            ),
+        )
 
     encoder.halt()
     encoder.beep()

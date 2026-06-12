@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
 from setra_cards.cards.crypto import DEFAULT_SIGNATURE, SystemSignature
 from setra_cards.storage.database import app_data_dir, install_root
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,16 +70,8 @@ class AppState:
         return self.operator is not None
 
 
-def _load_hotel_config() -> HotelConfig:
-    """Carga hotel.json del directorio de instalacion o AppData."""
-    candidates = [
-        install_root() / "hotel.json",
-        app_data_dir() / "hotel.json",
-    ]
-    for path in candidates:
-        if path.exists():
-            return _parse_hotel_json(path)
-    # Fallback: config por defecto (dev / sin instalar)
+def _demo_config() -> HotelConfig:
+    """Default config (dev / not installed) — Demo signature, never a real hotel."""
     return HotelConfig(
         name="Hotel Demo",
         short_name="Demo",
@@ -84,6 +79,28 @@ def _load_hotel_config() -> HotelConfig:
         signature=DEFAULT_SIGNATURE,
         des_key=b"god\x00\x00\x00\x00\x00",
     )
+
+
+def _load_hotel_config() -> HotelConfig:
+    """Carga hotel.json del directorio de instalacion o AppData."""
+    candidates = [
+        install_root() / "hotel.json",
+        app_data_dir() / "hotel.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            return _parse_hotel_json(path)
+        except Exception as exc:
+            # Loud: a corrupt hotel.json means cards would be written with the
+            # WRONG hotel identity. Surface it in the log and keep trying.
+            logger.error("hotel.json corrupto en %s: %s", path, exc)
+    logger.warning(
+        "hotel.json NO encontrado (o ilegible) en %s — usando configuración Demo",
+        " / ".join(str(p) for p in candidates),
+    )
+    return _demo_config()
 
 
 def _parse_hotel_json(path: Path) -> HotelConfig:
@@ -94,11 +111,19 @@ def _parse_hotel_json(path: Path) -> HotelConfig:
         sig_lo=int(sig["sig_lo"]),
         prefix=int(sig["prefix"]),
     )
-    des_raw = data.get("des_key", "god")
-    if des_raw == "god" or des_raw.startswith("god"):
+    des_raw = str(data.get("des_key", "god"))
+    if des_raw == "god":
+        # Exact literal only — anything else must be valid hex. The old
+        # startswith("god") silently mapped typos like "god1234" to the
+        # default key.
         des_key = b"god\x00\x00\x00\x00\x00"
     else:
-        des_key = bytes.fromhex(des_raw)
+        try:
+            des_key = bytes.fromhex(des_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"des_key invalido en {path}: debe ser 'god' o hex de 8 bytes"
+            ) from exc
     if len(des_key) != 8:
         raise ValueError(f"des_key must be 8 bytes, got {len(des_key)}")
     return HotelConfig(

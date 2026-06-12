@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
+import threading
 
 import flet as ft
 
@@ -53,34 +53,82 @@ def build_app(page: ft.Page) -> None:
 
 
 def _reset_admin() -> int:
-    """Elimina al operador 'Admin' para que se recree con PIN=1234 al próximo login."""
+    """Recovery flag: resets (or creates) the seed admin with a one-time random PIN.
+
+    Prefers an existing super_manager, then the 'Admin' row, then creates a new
+    'Admin'. The fresh PIN is printed to the console — it is never 1234 anymore.
+    """
+    from setra_cards.services.auth import generate_random_pin, hash_new_pin
     from setra_cards.storage.models import Operator
+
     sf = init_db()
     with sf() as s:
-        admin = s.query(Operator).filter(Operator.name == "Admin").first()
-        if admin:
-            s.delete(admin)
-            s.commit()
-            print("OK: operador 'Admin' eliminado. Al abrir la app se recreara con PIN=1234.")
-            print("    La app te pedira cambiar el PIN al primer login.")
-            return 0
-        # Si no hay Admin, puede haber un super_manager con otro nombre
-        super_op = s.query(Operator).filter(Operator.role == "super_manager").first()
-        if super_op:
-            # Reset PIN del super_manager existente a 1234
-            from setra_cards.services.auth import hash_new_pin
-            h, salt = hash_new_pin("1234")
-            super_op.pin_hash = h
-            super_op.pin_salt = salt
-            super_op.must_change_pin = True
-            s.commit()
-            print(f"OK: PIN de '{super_op.name}' (super_manager) reseteado a 1234.")
-            print(f"    Usuario: {super_op.name}")
-            print(f"    PIN:     1234")
-            print(f"    La app te pedira cambiar el PIN al primer login.")
-            return 0
-        print("ERROR: no hay operador Admin ni super_manager. Abre la app normal — se creara Admin/1234.")
-        return 1
+        op = (
+            s.query(Operator)
+            .filter(Operator.role == "super_manager")
+            .order_by(Operator.active.desc())
+            .first()
+        )
+        if op is None:
+            op = s.query(Operator).filter(Operator.name == "Admin").first()
+            if op is not None:
+                # No super_manager exists at all — promote so recovery grants admin access
+                op.role = "super_manager"
+
+        pin = generate_random_pin()
+        h, salt = hash_new_pin(pin)
+        if op is None:
+            op = Operator(
+                name="Admin",
+                pin_hash=h,
+                pin_salt=salt,
+                role="super_manager",
+                active=True,
+                must_change_pin=True,
+            )
+            s.add(op)
+            verb = "creado"
+        else:
+            op.pin_hash = h
+            op.pin_salt = salt
+            op.active = True
+            op.must_change_pin = True
+            verb = "reseteado"
+        s.commit()
+        print(f"OK: operador '{op.name}' (super_manager) {verb}.")
+        print(f"    Usuario:      {op.name}")
+        print(f"    PIN temporal: {pin}")
+        print("    La app te pedira cambiar el PIN al primer login.")
+        return 0
+
+
+def _start_background_update_check() -> None:
+    """Non-blocking daemon thread: checks for updates once at startup.
+
+    Log-only notification — installing still requires the operator to use the
+    "Buscar actualizacion" button in the Admin view.
+    """
+    logger = logging.getLogger(__name__)
+
+    def _check() -> None:
+        try:
+            from setra_cards.services import updater
+            result = updater.check_for_update()
+            if result.has_update and result.latest:
+                logger.info(
+                    "Update available: %s (installed: %s) — install via Administracion > Buscar actualizacion",
+                    result.latest.version,
+                    result.current_version,
+                )
+            elif result.error:
+                logger.info("Startup update check failed: %s", result.error)
+            else:
+                logger.info("Startup update check: already on latest (%s)", result.current_version)
+        except Exception as exc:
+            # Never let the startup check take the app down
+            logger.warning("Startup update check crashed: %s", exc)
+
+    threading.Thread(target=_check, name="startup-update-check", daemon=True).start()
 
 
 def main() -> None:
@@ -106,6 +154,9 @@ def main() -> None:
 
     # Inicializar DB + intentar auto-conectar encoder en background
     init_db()
+
+    # Best-effort startup update check (log-only; install stays manual in Admin)
+    _start_background_update_check()
 
     state = get_state()
     # Intento best-effort (no bloquea arranque si falla)

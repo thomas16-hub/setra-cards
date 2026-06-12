@@ -1,11 +1,19 @@
 """Tests de seguridad del updater."""
+import io
+import urllib.error
 import zipfile
-import hashlib
 import tempfile
 from pathlib import Path
 import pytest
 
-from setra_cards.services.updater import UpdateInfo, _extract_sha256_from_body
+from setra_cards.services.updater import (
+    ROBOCOPY_EXCLUDE_DIRS,
+    ROBOCOPY_EXCLUDE_FILES,
+    UpdateInfo,
+    _build_update_bat_script,
+    _extract_sha256_from_body,
+    check_for_update,
+)
 
 
 def test_extract_sha256_from_body():
@@ -50,6 +58,56 @@ def test_zip_path_traversal_detection():
                     traversal_found = True
                     break
             assert traversal_found, "El path traversal deberia haber sido detectado"
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url="https://api.github.com/repos/x/releases/latest",
+        code=code,
+        msg="Not Found" if code == 404 else "Forbidden",
+        hdrs=None,
+        fp=io.BytesIO(b""),
+    )
+
+
+@pytest.mark.parametrize("code", [404, 403])
+def test_check_for_update_private_repo_friendly_error(monkeypatch, code):
+    """404/403 (repo privado) muestra mensaje amigable, no 'HTTP Error 404'."""
+    def raise_http_error(*args, **kwargs):
+        raise _http_error(code)
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_http_error)
+    result = check_for_update()
+    assert result.has_update is False
+    assert result.latest is None
+    assert result.error == "Canal de actualización no disponible — contactar a soporte SETRA"
+    assert "404" not in result.error and "403" not in result.error
+
+
+def test_check_for_update_other_http_error_passthrough(monkeypatch):
+    """Otros codigos HTTP conservan el error crudo (diagnostico)."""
+    def raise_http_error(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            url="https://api.github.com", code=500, msg="Server Error", hdrs=None, fp=io.BytesIO(b"")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_http_error)
+    result = check_for_update()
+    assert result.has_update is False
+    assert "500" in (result.error or "")
+
+
+def test_update_bat_excludes_per_hotel_identity_and_secrets():
+    """El robocopy del update NO debe redistribuir hoteles/ ni pisar hotel.json."""
+    script = _build_update_bat_script(
+        Path("C:/tmp/payload"), Path("C:/app"), "Setra-CARDS.exe", Path("C:/tmp/stage")
+    )
+    assert "/XD hoteles drivers config data .browser-profile" in script
+    assert "/XF Instalar.bat Desinstalar.bat LEEME.txt hotel.json .installed" in script
+    # Constants stay in sync with the protocol-critical exclusions
+    assert "hoteles" in ROBOCOPY_EXCLUDE_DIRS
+    assert "hotel.json" in ROBOCOPY_EXCLUDE_FILES
+    assert ".installed" in ROBOCOPY_EXCLUDE_FILES
 
 
 def test_zip_normal_extraction():

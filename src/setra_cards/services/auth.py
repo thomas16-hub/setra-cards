@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 from dataclasses import dataclass
@@ -13,11 +14,19 @@ from sqlalchemy.orm import Session
 
 from setra_cards.storage.models import LoginAttempt, Operator
 
+logger = logging.getLogger(__name__)
+
 PIN_MIN_LEN = 4
 PIN_MAX_LEN = 20
-PBKDF2_ITER = 200_000
+PBKDF2_ITER = 600_000
+# Older DBs stored hashes at these costs; verify falls back to them and
+# authenticate() transparently re-hashes at PBKDF2_ITER on success.
+LEGACY_PBKDF2_ITERS: tuple[int, ...] = (200_000,)
 RATE_WINDOW_MIN = 5
 RATE_MAX_FAILS = 5
+# Global bucket: total failed attempts across ALL operator names per window.
+# Blocks an attacker rotating usernames to dodge the per-name lockout.
+RATE_MAX_FAILS_GLOBAL = 15
 
 # Jerarquía de roles — igual que locstar-app original
 ROLES = ("super_manager", "manager", "frontdesk")
@@ -41,8 +50,8 @@ class AuthResult:
     reason: str = ""
 
 
-def _hash_pin(pin: str, salt: bytes) -> str:
-    return hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, PBKDF2_ITER).hex()
+def _hash_pin(pin: str, salt: bytes, iterations: int = PBKDF2_ITER) -> str:
+    return hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, iterations).hex()
 
 
 def hash_new_pin(pin: str) -> tuple[str, str]:
@@ -53,41 +62,75 @@ def hash_new_pin(pin: str) -> tuple[str, str]:
     return _hash_pin(pin, salt), salt.hex()
 
 
-def verify_pin(operator: Operator, pin: str) -> bool:
+def _verify_pin_detailed(operator: Operator, pin: str) -> tuple[bool, bool]:
+    """Verify a PIN against current and legacy PBKDF2 costs.
+
+    Returns (ok, needs_rehash): needs_rehash is True when the stored hash
+    matched at a legacy iteration count and should be upgraded.
+    """
     try:
         salt = bytes.fromhex(operator.pin_salt)
     except ValueError:
-        return False
-    computed = _hash_pin(pin, salt)
-    return hmac.compare_digest(computed, operator.pin_hash)
+        return False, False
+    if hmac.compare_digest(_hash_pin(pin, salt), operator.pin_hash):
+        return True, False
+    for legacy_iter in LEGACY_PBKDF2_ITERS:
+        if hmac.compare_digest(_hash_pin(pin, salt, legacy_iter), operator.pin_hash):
+            return True, True
+    return False, False
+
+
+def verify_pin(operator: Operator, pin: str) -> bool:
+    ok, _ = _verify_pin_detailed(operator, pin)
+    return ok
 
 
 def ensure_seed_admin(session: Session) -> Operator:
-    """Garantiza la existencia de al menos un super_manager.
+    """Guarantee at least one ACTIVE super_manager exists.
 
-    Busca un operador con nombre 'Admin' o con rol 'super_manager'. Si no
-    encuentra ninguno, crea el Admin seed con PIN 1234 y must_change_pin=True.
-    Si ya existe un super_manager con otro nombre, lo devuelve tal cual — no
-    crea un Admin oculto adicional.
+    If any operator with role='super_manager' AND active=True exists, return it
+    untouched. Otherwise create (or reactivate) the seed 'Admin' with a random
+    one-time PIN and must_change_pin=True. The PIN is logged once (setup /
+    recovery channel); `--reset-admin` prints a fresh one to the console.
     """
+    active_super = (
+        session.query(Operator)
+        .filter(Operator.role == "super_manager", Operator.active.is_(True))
+        .first()
+    )
+    if active_super:
+        return active_super
+
+    pin = generate_random_pin()
+    h, salt = hash_new_pin(pin)
     admin = session.query(Operator).filter(Operator.name == "Admin").first()
     if admin:
-        return admin
-    super_op = session.query(Operator).filter(Operator.role == "super_manager").first()
-    if super_op:
-        return super_op
-    h, salt = hash_new_pin("1234")
-    op = Operator(
-        name="Admin",
-        pin_hash=h,
-        pin_salt=salt,
-        role="super_manager",
-        active=True,
-        must_change_pin=True,
-    )
-    session.add(op)
+        admin.role = "super_manager"
+        admin.active = True
+        admin.pin_hash = h
+        admin.pin_salt = salt
+        admin.must_change_pin = True
+        op = admin
+        verb = "reactivated"
+    else:
+        op = Operator(
+            name="Admin",
+            pin_hash=h,
+            pin_salt=salt,
+            role="super_manager",
+            active=True,
+            must_change_pin=True,
+        )
+        session.add(op)
+        verb = "created"
     session.commit()
     session.refresh(op)
+    # Bootstrap channel: without an active super_manager nobody can log in.
+    # One-time PIN, forced change at first login.
+    logger.warning(
+        "Seed admin '%s' %s with one-time PIN %s — must be changed at first login",
+        op.name, verb, pin,
+    )
     return op
 
 
@@ -114,6 +157,16 @@ def _recent_fails(session: Session, operator_name: str) -> int:
     )
 
 
+def _recent_fails_global(session: Session) -> int:
+    """Total failed attempts across ALL names within the window."""
+    cutoff = datetime.now() - timedelta(minutes=RATE_WINDOW_MIN)
+    return (
+        session.query(LoginAttempt)
+        .filter(LoginAttempt.attempted_at >= cutoff)
+        .count()
+    )
+
+
 def _record_fail(session: Session, operator_name: str) -> None:
     session.add(LoginAttempt(operator_name=operator_name))
     session.commit()
@@ -129,13 +182,29 @@ def authenticate(session: Session, name: str, pin: str) -> AuthResult:
     if not name_clean or not pin:
         return AuthResult(False, reason="Usuario y PIN requeridos")
 
+    if _recent_fails_global(session) >= RATE_MAX_FAILS_GLOBAL:
+        return AuthResult(False, reason="Demasiados intentos fallidos. Espere 5 minutos.")
+
     if _recent_fails(session, name_clean) >= RATE_MAX_FAILS:
         return AuthResult(False, reason="Demasiados intentos fallidos. Espere 5 minutos.")
 
     op = session.query(Operator).filter(Operator.name == name_clean, Operator.active.is_(True)).first()
-    if not op or not verify_pin(op, pin):
+    if not op:
         _record_fail(session, name_clean)
         return AuthResult(False, reason="Usuario o PIN incorrecto")
+
+    ok, needs_rehash = _verify_pin_detailed(op, pin)
+    if not ok:
+        _record_fail(session, name_clean)
+        return AuthResult(False, reason="Usuario o PIN incorrecto")
+
+    if needs_rehash:
+        # Transparent upgrade of legacy-cost hashes (persisted by _clear_fails' commit).
+        # Bypass hash_new_pin's length policy: the PIN already verified.
+        new_salt = os.urandom(16)
+        op.pin_hash = _hash_pin(pin, new_salt)
+        op.pin_salt = new_salt.hex()
+        logger.info("PIN hash upgraded to %d PBKDF2 iterations for operator '%s'", PBKDF2_ITER, op.name)
 
     _clear_fails(session, name_clean)
     return AuthResult(True, operator=op)

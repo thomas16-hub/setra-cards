@@ -24,6 +24,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
+      - name: Run tests (release gate)
+        run: python -m pytest tests -q
+
+      - name: Guard — tag must match package __version__
+        shell: pwsh
+        run: |
+          python -c "import os, sys; from setra_cards import __version__; tag = os.environ['GITHUB_REF_NAME']; expected = 'v' + __version__; print(f'tag={tag} expected={expected}'); sys.exit(0 if tag == expected else 1)"
+
       - name: Download Flet desktop client (for offline-friendly bundle)
         shell: pwsh
         run: |

@@ -24,8 +24,12 @@ python -m setra_cards.main
 
 El primer arranque:
 - Crea `%LOCALAPPDATA%\SETRA\SetraCARDS\` con la base de datos vacia
-- Crea operador `Admin` con PIN `1234` (pide cambio en primer login)
+- Crea operador `Admin` con un PIN aleatorio de un solo uso (queda registrado
+  una vez en `setra-cards.log`; la app exige cambiarlo en el primer login)
 - Auto-detecta el encoder USB si esta conectado
+
+Recuperacion de acceso: `Setra-CARDS.exe --reset-admin` imprime en consola un
+PIN temporal nuevo para el super manager.
 
 ## Distribucion (build + instalador)
 
@@ -40,11 +44,13 @@ crea acceso directo, registra arranque automatico, y deja el
 
 ## Actualizaciones OTA
 
-La app chequea GitHub Releases al arrancar + boton manual en
-Administracion. Si hay una version nueva:
-1. Descarga el `.exe` nuevo
-2. Verifica SHA-256
-3. Reemplaza y reinicia
+La instalacion de actualizaciones es **manual**: boton "Buscar actualizacion"
+en Administracion. Al arrancar, la app hace ademas un chequeo best-effort en
+segundo plano que solo deja constancia en el log si hay version nueva — nunca
+descarga ni instala sola. Al instalar desde el boton:
+1. Descarga el `.zip` del release
+2. Verifica SHA-256 (obligatorio — sin hash publicado se rechaza)
+3. Reemplaza archivos (preservando `hotel.json`, datos y configs por-PC) y reinicia
 
 ## Arquitectura
 

@@ -20,8 +20,8 @@ from setra_cards.cards.builder import (
     build_master_card,
     build_setting_card,
 )
-from setra_cards.cards.reader import read_card
-from setra_cards.cards.s70_reader import read_s70_card, S70CardData
+from setra_cards.cards.reader import DecodedCard, read_card
+from setra_cards.cards.s70_reader import read_s70_card
 from setra_cards.cards.writer import blank_card, write_card
 from setra_cards.core.app_state import HotelConfig
 from setra_cards.encoder.driver import EncoderDriver
@@ -37,6 +37,27 @@ from setra_cards.services.action_log import log as log_action
 from setra_cards.storage.models import CardLog, Guest, Room
 
 logger = logging.getLogger(__name__)
+
+# Operator-facing card type labels (Spanish) keyed by protocol type byte.
+CARD_TYPE_LABELS_ES: dict[int, str] = {
+    CARD_TYPE_GUEST: "Huésped",
+    CARD_TYPE_LAUNDRY: "Limpieza",
+    CARD_TYPE_MASTER: "Maestra",
+    CARD_TYPE_SETTING: "Configuración",
+    CARD_TYPE_CLOCK: "Reloj",
+    CARD_TYPE_AUTH: "Autorización",
+}
+
+# CardLog.card_type_byte sentinel for blank operations on unreadable cards.
+BLANK_TYPE_BYTE = 0xFF
+
+# Auth cards are valid 30 days from issue (see builder.build_auth_card).
+AUTH_CARD_VALIDITY_DAYS = 30
+
+
+def _card_type_label(card_type: int) -> str:
+    """Spanish display label for a protocol card type byte."""
+    return CARD_TYPE_LABELS_ES.get(card_type, f"Desconocida (0x{card_type:02X})")
 
 
 @dataclass(frozen=True)
@@ -64,13 +85,14 @@ def _log_emission(
     valid_from: datetime | None = None,
     expires_at: datetime | None = None,
     error: str | None = None,
+    room_display: str | None = None,
 ) -> CardLog:
     entry = CardLog(
         card_type=card_type,
         card_type_byte=type_byte,
         guest_id=guest.id if guest else None,
         room_id=room.id if room else None,
-        room_display=room.display_number if room else None,
+        room_display=room_display if room_display is not None else (room.display_number if room else None),
         uid_hex=uid_hex,
         valid_from=valid_from,
         expires_at=expires_at,
@@ -83,22 +105,34 @@ def _log_emission(
     return entry
 
 
-def _invalidate_previous_guest_cards(session: Session, room: Room) -> int:
-    """Marca tarjetas anteriores como expiradas para la misma habitacion."""
-    now = datetime.now()
+def invalidate_active_guest_cards(
+    session: Session, room_id: int, *, now: datetime | None = None,
+) -> int:
+    """Expire all still-active Guest CardLog rows for a room.
+
+    Does NOT commit — the caller owns the transaction boundary.
+    Returns the number of rows expired.
+    """
+    effective_now = now or datetime.now()
     stmt = (
         sql_update(CardLog)
         .where(
-            CardLog.room_id == room.id,
+            CardLog.room_id == room_id,
             CardLog.card_type == "Guest",
             CardLog.success.is_(True),
-            CardLog.expires_at > now,
+            CardLog.expires_at > effective_now,
         )
-        .values(expires_at=now)
+        .values(expires_at=effective_now)
     )
     result = session.execute(stmt)
-    session.commit()
     return result.rowcount
+
+
+def _invalidate_previous_guest_cards(session: Session, room: Room) -> int:
+    """Expire previous Guest cards for the room and commit immediately."""
+    count = invalidate_active_guest_cards(session, room.id)
+    session.commit()
+    return count
 
 
 def create_guest_card(
@@ -142,17 +176,25 @@ def create_guest_card(
         )
         return CardResult(False, "Guest", uid_hex=uid_hex, error=result.error or "Error al escribir")
 
-    if invalidate_previous:
-        _invalidate_previous_guest_cards(session, room)
+    try:
+        if invalidate_previous:
+            _invalidate_previous_guest_cards(session, room)
 
-    _log_emission(
-        session, "Guest", CARD_TYPE_GUEST, uid_hex, True, operator,
-        room=room, guest=guest, valid_from=valid_from, expires_at=valid_until,
-    )
-    log_action(
-        session, "card_guest", operator,
-        f"Hab. {room.display_number}, {guest.name if guest else '(sin huesped)'} hasta {valid_until:%Y-%m-%d %H:%M}",
-    )
+        _log_emission(
+            session, "Guest", CARD_TYPE_GUEST, uid_hex, True, operator,
+            room=room, guest=guest, valid_from=valid_from, expires_at=valid_until,
+        )
+        log_action(
+            session, "card_guest", operator,
+            f"Hab. {room.display_number}, {guest.name if guest else '(sin huesped)'} hasta {valid_until:%Y-%m-%d %H:%M}",
+        )
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful guest card write")
+        return CardResult(
+            False, "Guest", uid_hex=uid_hex,
+            error=f"Tarjeta grabada pero falló el registro en base de datos: {exc}",
+        )
     return CardResult(
         True, "Guest", uid_hex=uid_hex, room_display=room.display_number,
         guest_id=guest.id if guest else None,
@@ -187,6 +229,11 @@ def change_guest_room(
     decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
     if not decoded:
         return CardResult(False, "Guest", error="No se pudo leer la tarjeta. Coloquela en el encoder.")
+    if not decoded.checksum_valid or not decoded.uid_match:
+        return CardResult(
+            False, "Guest",
+            error="Tarjeta corrupta o de otro sistema — no se puede cambiar de habitación",
+        )
     if decoded.card_type != CARD_TYPE_GUEST:
         return CardResult(False, "Guest", error="La tarjeta no es Guest — use checkout + nuevo check-in")
     # Validar que la tarjeta corresponde a old_room (por building+floor+room_no_id)
@@ -246,39 +293,19 @@ def change_guest_room(
         )
         return CardResult(False, "Guest", uid_hex=uid_hex, error=result.error or "Error al reescribir tarjeta")
 
-    # 4) Transaccion atomica: expirar CardLog viejo + cambiar estados + log nuevo + audit
-    from sqlalchemy import update as sql_update
+    # 4) Atomic transaction: expire old CardLog + room states + new log + audit.
+    #    _log_emission commits, so it goes last — its commit closes the whole unit.
     try:
-        session.execute(
-            sql_update(CardLog)
-            .where(
-                CardLog.room_id == old_room.id,
-                CardLog.card_type == "Guest",
-                CardLog.success.is_(True),
-                CardLog.expires_at > now,
-            )
-            .values(expires_at=now)
-        )
-        # Estados: old → sucia (pendiente limpieza), new → ocupada... usamos sucia/limpia
+        invalidate_active_guest_cards(session, old_room.id, now=now)
+        # States: old → "sucia" (pending cleaning); new_room is left as-is
+        # (staff updates its state per their own flow).
         old_r = session.get(Room, old_room.id)
-        new_r = session.get(Room, new_room.id)
         if old_r is not None:
             old_r.state = "sucia"
-        # new_room queda como esta (el staff cambia el estado segun su flujo)
-        # Crear CardLog nuevo
-        session.add(CardLog(
-            card_type="Guest",
-            card_type_byte=CARD_TYPE_GUEST,
-            guest_id=guest.id if guest else None,
-            room_id=new_room.id,
-            room_display=new_room.display_number,
-            uid_hex=uid_hex,
-            valid_from=now,
-            expires_at=valid_until,
-            operator=operator,
-            success=True,
-        ))
-        session.commit()
+        _log_emission(
+            session, "Guest", CARD_TYPE_GUEST, uid_hex, True, operator,
+            room=new_room, guest=guest, valid_from=now, expires_at=valid_until,
+        )
     except Exception as exc:
         session.rollback()
         logger.exception("Error en transaccion change_guest_room")
@@ -316,15 +343,28 @@ def create_master_card(
 
     result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key)
     uid_hex = result.uid.hex(":") if result.uid else None
-    _log_emission(
-        session, "Master", CARD_TYPE_MASTER, uid_hex, result.success, operator,
-        valid_from=now, expires_at=valid_until, error=result.error,
-    )
-    if result.success:
+    if not result.success:
+        _log_emission(
+            session, "Master", CARD_TYPE_MASTER, uid_hex, False, operator,
+            valid_from=now, expires_at=valid_until, error=result.error,
+        )
+        return CardResult(False, "Master", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+    try:
+        _log_emission(
+            session, "Master", CARD_TYPE_MASTER, uid_hex, True, operator,
+            valid_from=now, expires_at=valid_until,
+        )
         log_action(session, "card_master", operator, f"Hasta {valid_until:%Y-%m-%d %H:%M}")
-        return CardResult(True, "Master", uid_hex=uid_hex, valid_from=now, expires_at=valid_until,
-                          message="Llave maestra grabada")
-    return CardResult(False, "Master", uid_hex=uid_hex, error=result.error or "Error al escribir")
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful master card write")
+        return CardResult(
+            False, "Master", uid_hex=uid_hex,
+            error=f"Tarjeta grabada pero falló el registro en base de datos: {exc}",
+        )
+    return CardResult(True, "Master", uid_hex=uid_hex, valid_from=now, expires_at=valid_until,
+                      message="Llave maestra grabada")
 
 
 def create_auth_card(
@@ -337,11 +377,28 @@ def create_auth_card(
         return CardResult(False, "Auth", error=f"Error interno: {exc}")
     result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key)
     uid_hex = result.uid.hex(":") if result.uid else None
-    _log_emission(session, "Auth", CARD_TYPE_AUTH, uid_hex, result.success, operator, error=result.error)
-    if result.success:
+    expires_at = now + timedelta(days=AUTH_CARD_VALIDITY_DAYS)
+    if not result.success:
+        _log_emission(
+            session, "Auth", CARD_TYPE_AUTH, uid_hex, False, operator,
+            valid_from=now, expires_at=expires_at, error=result.error,
+        )
+        return CardResult(False, "Auth", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+    try:
+        _log_emission(
+            session, "Auth", CARD_TYPE_AUTH, uid_hex, True, operator,
+            valid_from=now, expires_at=expires_at,
+        )
         log_action(session, "card_auth", operator, "Tarjeta Auth grabada")
-        return CardResult(True, "Auth", uid_hex=uid_hex, message="Tarjeta Auth grabada")
-    return CardResult(False, "Auth", uid_hex=uid_hex, error=result.error or "Error al escribir")
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful auth card write")
+        return CardResult(
+            False, "Auth", uid_hex=uid_hex,
+            error=f"Tarjeta grabada pero falló el registro en base de datos: {exc}",
+        )
+    return CardResult(True, "Auth", uid_hex=uid_hex, message="Tarjeta Auth grabada")
 
 
 def create_clock_card(
@@ -354,11 +411,21 @@ def create_clock_card(
         return CardResult(False, "Clock", error=f"Error interno: {exc}")
     result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key)
     uid_hex = result.uid.hex(":") if result.uid else None
-    _log_emission(session, "Clock", CARD_TYPE_CLOCK, uid_hex, result.success, operator, error=result.error)
-    if result.success:
+    if not result.success:
+        _log_emission(session, "Clock", CARD_TYPE_CLOCK, uid_hex, False, operator, error=result.error)
+        return CardResult(False, "Clock", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+    try:
+        _log_emission(session, "Clock", CARD_TYPE_CLOCK, uid_hex, True, operator)
         log_action(session, "card_clock", operator, "Tarjeta Clock grabada")
-        return CardResult(True, "Clock", uid_hex=uid_hex, message="Tarjeta Clock grabada")
-    return CardResult(False, "Clock", uid_hex=uid_hex, error=result.error or "Error al escribir")
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful clock card write")
+        return CardResult(
+            False, "Clock", uid_hex=uid_hex,
+            error=f"Tarjeta grabada pero falló el registro en base de datos: {exc}",
+        )
+    return CardResult(True, "Clock", uid_hex=uid_hex, message="Tarjeta Clock grabada")
 
 
 def create_setting_card(
@@ -379,17 +446,29 @@ def create_setting_card(
     result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key,
                         building=room.building)
     uid_hex = result.uid.hex(":") if result.uid else None
-    _log_emission(
-        session, "Setting", CARD_TYPE_SETTING, uid_hex, result.success, operator,
-        room=room, error=result.error,
-    )
-    if result.success:
-        log_action(session, "card_setting", operator, f"Habitacion {room.display_number}")
-        return CardResult(
-            True, "Setting", uid_hex=uid_hex, room_display=room.display_number,
-            message=f"Setting card para hab. {room.display_number}",
+    if not result.success:
+        _log_emission(
+            session, "Setting", CARD_TYPE_SETTING, uid_hex, False, operator,
+            room=room, error=result.error,
         )
-    return CardResult(False, "Setting", uid_hex=uid_hex, error=result.error or "Error al escribir")
+        return CardResult(False, "Setting", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+    try:
+        _log_emission(
+            session, "Setting", CARD_TYPE_SETTING, uid_hex, True, operator, room=room,
+        )
+        log_action(session, "card_setting", operator, f"Habitacion {room.display_number}")
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful setting card write")
+        return CardResult(
+            False, "Setting", uid_hex=uid_hex,
+            error=f"Tarjeta grabada pero falló el registro en base de datos: {exc}",
+        )
+    return CardResult(
+        True, "Setting", uid_hex=uid_hex, room_display=room.display_number,
+        message=f"Setting card para hab. {room.display_number}",
+    )
 
 
 def create_laundry_card(
@@ -409,7 +488,9 @@ def create_laundry_card(
     Las habitaciones asignadas al staff se registran en el audit log para
     trazabilidad aunque físicamente la tarjeta abra todas.
     """
-    from datetime import timedelta
+    if hours <= 0:
+        return CardResult(False, "Limpieza", error="La duración debe ser mayor a 0 horas")
+
     now = datetime.now()
     expire = now + timedelta(hours=hours)
     try:
@@ -430,57 +511,173 @@ def create_laundry_card(
     else:
         assigned_desc = ""
 
-    # error_message solo se llena cuando hay fallo real; el assigned_desc
-    # es metadata de auditoría y va en la detail del action_log, no en error_message
-    error_msg = result.error if not result.success else None
-    _log_emission(
-        session, "Laundry", CARD_TYPE_LAUNDRY, uid_hex, result.success, operator,
-        expires_at=expire,
-        error=error_msg,
-    )
-    if result.success:
+    # error_message is only set on real failures; assigned_desc is audit
+    # metadata and goes in the action_log detail, not in error_message.
+    if not result.success:
+        _log_emission(
+            session, "Laundry", CARD_TYPE_LAUNDRY, uid_hex, False, operator,
+            valid_from=now, expires_at=expire, error=result.error,
+        )
+        return CardResult(False, "Limpieza", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+    try:
+        _log_emission(
+            session, "Laundry", CARD_TYPE_LAUNDRY, uid_hex, True, operator,
+            valid_from=now, expires_at=expire,
+        )
         staff_info = f" para {staff_name}" if staff_name else ""
         detail = f"Tarjeta limpieza{staff_info} — {hours}h, hasta {expire.strftime('%H:%M')}{assigned_desc}"
         log_action(session, "card_laundry", operator, detail)
-        msg_extra = ""
-        if assigned_rooms:
-            msg_extra = f" · {len(assigned_rooms)} hab. asignadas a {staff_name or 'limpiador'}"
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful laundry card write")
         return CardResult(
-            True, "Limpieza", uid_hex=uid_hex,
-            message=f"Tarjeta limpieza emitida — válida {hours}h (hasta {expire.strftime('%d/%m %H:%M')}){msg_extra}",
+            False, "Limpieza", uid_hex=uid_hex,
+            error=f"Tarjeta grabada pero falló el registro en base de datos: {exc}",
         )
-    return CardResult(False, "Limpieza", uid_hex=uid_hex, error=result.error or "Error al escribir")
+
+    msg_extra = ""
+    if assigned_rooms:
+        msg_extra = f" · {len(assigned_rooms)} hab. asignadas a {staff_name or 'limpiador'}"
+    return CardResult(
+        True, "Limpieza", uid_hex=uid_hex,
+        message=f"Tarjeta limpieza emitida — válida {hours}h (hasta {expire.strftime('%d/%m %H:%M')}){msg_extra}",
+    )
+
+
+def _decoded_room_display(decoded: DecodedCard) -> str | None:
+    """Compact room descriptor for audit traceability (fits CardLog.room_display)."""
+    if decoded.card_type in (CARD_TYPE_GUEST, CARD_TYPE_SETTING):
+        return f"B{decoded.building}/P{decoded.floor}/H{decoded.room_no_id}"
+    return None
 
 
 def blank_existing_card(
     *, encoder: EncoderDriver, hotel: HotelConfig, session: Session, operator: str,
+    expect_card_type: int | None = None,
+    force: bool = False,
 ) -> CardResult:
+    """Blank the card currently on the encoder.
+
+    Reads the card first so the wiped content stays traceable in the audit
+    log (a wiped Master is no longer anonymous). When ``expect_card_type`` is
+    given and the card on the encoder does not match (or cannot be read), the
+    blank is refused unless ``force=True`` — this protects global
+    Master/Laundry cards from accidental wipes.
+    """
+    decoded = None
+    try:
+        decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
+    except Exception:
+        logger.exception("Pre-blank read failed; proceeding without decoded card info")
+
+    if expect_card_type is not None and not force:
+        if decoded is None:
+            return CardResult(
+                False, "Blank",
+                error="No se pudo leer la tarjeta para verificar su tipo — use Forzar si está seguro",
+            )
+        if decoded.card_type != expect_card_type:
+            tipo = _card_type_label(decoded.card_type)
+            return CardResult(
+                False, "Blank",
+                error=f"La tarjeta en el encoder es {tipo}, no coincide — use Forzar si está seguro",
+            )
+
+    # Traceability: record WHAT is being wiped in the Blank CardLog row.
+    if decoded is not None:
+        wiped_type_byte = decoded.card_type
+        wiped_room_display = _decoded_room_display(decoded)
+        is_blank = bool(getattr(decoded, "is_blank", False))
+        wiped_label = "en blanco" if is_blank else _card_type_label(decoded.card_type)
+    else:
+        wiped_type_byte = BLANK_TYPE_BYTE
+        wiped_room_display = None
+        wiped_label = "ilegible"
+
     result = blank_card(encoder, hotel.sector)
     uid_hex = result.uid.hex(":") if result.uid else None
-    _log_emission(session, "Blank", 0xFF, uid_hex, result.success, operator, error=result.error)
-    if result.success:
-        log_action(session, "card_blank", operator, f"UID {uid_hex}")
-        return CardResult(True, "Blank", uid_hex=uid_hex, message="Tarjeta borrada")
-    return CardResult(False, "Blank", uid_hex=uid_hex, error=result.error or "Error al borrar")
+    if not result.success:
+        _log_emission(
+            session, "Blank", wiped_type_byte, uid_hex, False, operator,
+            room_display=wiped_room_display, error=result.error,
+        )
+        return CardResult(False, "Blank", uid_hex=uid_hex, error=result.error or "Error al borrar")
+
+    try:
+        _log_emission(
+            session, "Blank", wiped_type_byte, uid_hex, True, operator,
+            room_display=wiped_room_display,
+        )
+        detail = f"UID {uid_hex} — era {wiped_label}"
+        if wiped_room_display:
+            detail += f" ({wiped_room_display})"
+        log_action(session, "card_blank", operator, detail)
+    except Exception as exc:
+        session.rollback()
+        logger.exception("DB audit failed after successful card blank")
+        return CardResult(
+            False, "Blank", uid_hex=uid_hex,
+            error=f"Tarjeta borrada pero falló el registro en base de datos: {exc}",
+        )
+    return CardResult(True, "Blank", uid_hex=uid_hex, message="Tarjeta borrada")
+
+
+def _global_card_status(decoded: DecodedCard) -> str:
+    """Diagnose a Master/Laundry tail: GLOBAL (correct) vs room-bound (old bug)."""
+    tail = (decoded.building, decoded.floor, decoded.room_no_id)
+    if tail == (0, 0, 0):
+        return "GLOBAL — abre todas las puertas (correcta)"
+    return (
+        f"LIGADA a edif {decoded.building} piso {decoded.floor} "
+        f"hab {decoded.room_no_id} — tarjeta vieja, RE-EMITIR"
+    )
 
 
 def read_existing_card(
     *, encoder: EncoderDriver, hotel: HotelConfig,
 ) -> tuple[bool, str, dict]:
+    """Read and diagnose the card on the encoder. Returns (ok, message, info)."""
     decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
     if not decoded:
         return False, "No se pudo leer la tarjeta — coloquela en el encoder", {}
+
+    now = datetime.now()
+    expired = bool(decoded.date2 is not None and decoded.date2 < now)
+    # is_blank is a new reader flag; getattr keeps this working until it lands.
+    is_blank = bool(getattr(decoded, "is_blank", False))
+
     info = {
         "card_type_byte": decoded.card_type,
+        "card_type_name": decoded.card_type_name,
+        "tipo": _card_type_label(decoded.card_type),
         "uid": decoded.uid.hex(":"),
-        "room": getattr(decoded, "room", None),
-        "building": getattr(decoded, "building", None),
-        "floor": getattr(decoded, "floor", None),
-        "room_no_id": getattr(decoded, "room_no_id", None),
-        "valid_from": getattr(decoded, "valid_from", None),
-        "valid_until": getattr(decoded, "valid_until", None),
+        "room": decoded.room,
+        "building": decoded.building,
+        "floor": decoded.floor,
+        "room_no_id": decoded.room_no_id,
+        "valid_from": decoded.date1,
+        "valid_until": decoded.date2,
+        "checksum_valid": decoded.checksum_valid,
+        "uid_match": decoded.uid_match,
+        "signature": decoded.signature.hex(" ").upper(),
+        "expired": expired,
     }
-    return True, "Tarjeta leida", info
+
+    if not is_blank and decoded.card_type in (CARD_TYPE_MASTER, CARD_TYPE_LAUNDRY):
+        info["estado"] = _global_card_status(decoded)
+
+    if is_blank:
+        message = "Tarjeta EN BLANCO"
+    elif not decoded.checksum_valid:
+        message = "Tarjeta CORRUPTA (checksum inválido)"
+    elif not decoded.uid_match:
+        message = "Tarjeta de otro sistema (UID/DES no coincide)"
+    elif expired:
+        message = "Tarjeta leida — VENCIDA"
+    else:
+        message = "Tarjeta leida"
+    return True, message, info
 
 
 def read_s70_data_card(

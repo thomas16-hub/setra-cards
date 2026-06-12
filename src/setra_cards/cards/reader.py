@@ -36,6 +36,16 @@ class DecodedCard:
     checksum_valid: bool
     uid_match: bool
     raw_blocks: dict[int, bytes]
+    is_blank: bool = False
+
+
+def _is_blank_sector(block45: bytes, block46: bytes) -> bool:
+    """A blank (factory/erased) sector has all-zero data blocks.
+
+    Without this flag an all-zero block45 decodes as a checksum-valid
+    Guest card (card_type 0x00), which is misleading in the UI.
+    """
+    return block45 == bytes(16) and block46 == bytes(16)
 
 
 def _decode_date(data: bytes, offset: int) -> datetime | None:
@@ -131,4 +141,5 @@ def read_card(
         checksum_valid=checksum_valid,
         uid_match=uid_match,
         raw_blocks=raw_blocks,
+        is_blank=_is_blank_sector(b45, b46),
     )

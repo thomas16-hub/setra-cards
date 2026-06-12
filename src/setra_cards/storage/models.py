@@ -18,6 +18,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -45,6 +46,14 @@ class Room(Base):
     """Habitacion del hotel."""
 
     __tablename__ = "rooms"
+    __table_args__ = (
+        # The lock validates exactly this triple (block45 tail bytes 12-14):
+        # a collision means two rooms open with the same guest card.
+        UniqueConstraint(
+            "building", "floor", "room_no_id",
+            name="uq_rooms_building_floor_room_no_id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     sequential_id: Mapped[int] = mapped_column(Integer, unique=True)
