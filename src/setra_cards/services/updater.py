@@ -71,6 +71,13 @@ REQUIRE_SIGNED = True
 
 TIMEOUT = 15
 
+# Fallback channel while the signed manifest is not published: the GitHub
+# release flow v2.0.10 used (HTTPS to github.com + mandatory sha256 in the
+# release body). Without it v2.1.x could never update itself.
+GITHUB_LATEST_URL = "https://api.github.com/repos/thomas16-hub/setra-cards/releases/latest"
+GITHUB_DOWNLOAD_PREFIX = "https://github.com/thomas16-hub/setra-cards/releases/download/"
+GITHUB_ASSET_PATTERN = re.compile(r"setra-cards.*\.zip$", re.IGNORECASE)
+
 # Spanish operator-facing messages (technical detail stays in the logs).
 ERR_BAD_SIGNATURE = "Firma del manifest inválida — actualización rechazada"
 ERR_UNTRUSTED_URL = "URL de descarga no confiable — actualización rechazada"
@@ -103,6 +110,8 @@ class UpdateInfo:
     sha256: str | None
     notes: str
     signature: str = ""
+    # "manifest" (Ed25519-signed channel) or "github" (release + sha256 in body).
+    source: str = "manifest"
 
 
 @dataclass(frozen=True)
@@ -166,7 +175,60 @@ def _asset_name_from_url(url: str) -> str:
     return name or "setra-cards-update.zip"
 
 
+def _check_github() -> CheckResult:
+    """Latest GitHub release (same rules as v2.0.10): zip asset + sha256 in body."""
+    try:
+        req = urllib.request.Request(
+            GITHUB_LATEST_URL,
+            headers={
+                "User-Agent": f"SetraCARDS/{__version__}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=_SSL_CTX) as resp:  # nosec B310
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        logger.warning("GitHub release check failed: %s", exc)
+        return CheckResult(__version__, None, False, error=ERR_NETWORK)
+
+    if not isinstance(data, dict):
+        return CheckResult(__version__, None, False, error=ERR_BAD_MANIFEST)
+    tag = str(data.get("tag_name") or "")
+    assets = data.get("assets") or []
+    asset = next(
+        (a for a in assets if isinstance(a, dict) and GITHUB_ASSET_PATTERN.match(str(a.get("name", "")))),
+        None,
+    )
+    match = re.search(r"sha256[:\s]+([a-f0-9]{64})", str(data.get("body") or ""), re.IGNORECASE)
+    if not tag or asset is None or match is None:
+        logger.warning("GitHub release %r lacks a zip asset or sha256", tag)
+        return CheckResult(__version__, None, False, error=ERR_BAD_MANIFEST)
+    url = str(asset.get("browser_download_url") or "")
+    if not url.startswith(GITHUB_DOWNLOAD_PREFIX):
+        logger.warning("GitHub asset url outside trusted prefix: %s", url)
+        return CheckResult(__version__, None, False, error=ERR_UNTRUSTED_URL)
+
+    latest = UpdateInfo(
+        version=tag.lstrip("v"),
+        asset_url=url,
+        asset_name=str(asset.get("name")),
+        sha256=match.group(1).lower(),
+        notes=str(data.get("body") or ""),
+        source="github",
+    )
+    return CheckResult(__version__, latest, _parse_version(latest.version) > _parse_version(__version__))
+
+
 def check_for_update() -> CheckResult:
+    """Signed manifest first; GitHub release when the manifest is unreachable."""
+    result = _check_manifest()
+    if result.error == ERR_NETWORK:
+        logger.info("Signed manifest unavailable, falling back to GitHub releases")
+        return _check_github()
+    return result
+
+
+def _check_manifest() -> CheckResult:
     try:
         req = urllib.request.Request(
             MANIFEST_URL,  # hardcoded https URL, never operator-controlled
@@ -305,14 +367,18 @@ def apply_update(info: UpdateInfo) -> None:
     if not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
         raise ValueError(f"SHA-256 inválido en el release: {info.sha256}")
 
-    # SSRF guard (defence in depth): only download from the trusted prefix.
-    if not info.asset_url.startswith(TRUSTED_DOWNLOAD_PREFIX):
+    # SSRF guard (defence in depth): only download from the trusted prefix
+    # of the channel the update came from.
+    is_github = info.source == "github"
+    prefix = GITHUB_DOWNLOAD_PREFIX if is_github else TRUSTED_DOWNLOAD_PREFIX
+    if not info.asset_url.startswith(prefix):
         raise ValueError(ERR_UNTRUSTED_URL)
 
     # Re-verify the signature before doing anything destructive. check_for_update
     # already verified it, but re-check so a stale/forged UpdateInfo can't slip
-    # straight into apply_update from another path.
-    if REQUIRE_SIGNED and not _verify_manifest_signature(
+    # straight into apply_update from another path. GitHub releases carry no
+    # signature: integrity rests on HTTPS + the mandatory sha256 (as in v2.0.10).
+    if not is_github and REQUIRE_SIGNED and not _verify_manifest_signature(
         info.version, info.asset_url, expected_sha, info.signature
     ):
         raise ValueError(ERR_BAD_SIGNATURE)
@@ -351,7 +417,7 @@ def apply_update(info: UpdateInfo) -> None:
 
     # Re-verify the signature AFTER the download, before launching the swap, now
     # that the SHA we trusted is the one we actually received.
-    if REQUIRE_SIGNED and not _verify_manifest_signature(
+    if not is_github and REQUIRE_SIGNED and not _verify_manifest_signature(
         info.version, info.asset_url, expected_sha, info.signature
     ):
         shutil.rmtree(staging, ignore_errors=True)
