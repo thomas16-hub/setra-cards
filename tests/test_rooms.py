@@ -33,7 +33,7 @@ def test_create_room_floor_out_of_range(session):
 
 def test_update_room_empty_display(session):
     r = create_room(session, "104", building=1, floor=1)
-    with pytest.raises(ValueError, match="vacio"):
+    with pytest.raises(ValueError, match="vacío"):
         update_room(session, r.id, display_number="   ")
 
 

@@ -51,7 +51,7 @@ def build(page: ft.Page) -> ft.Control:
         if not entries:
             host.content = SectionCard(content=EmptyState(
                 "Sin actividad registrada",
-                "Las acciones aparecen aqui a medida que ocurren.",
+                "Las acciones aparecen aquí a medida que ocurren.",
                 icon=ft.Icons.RECEIPT_LONG_OUTLINED,
             ))
         else:
@@ -142,13 +142,13 @@ def _unify(cards: list[CardLog], actions: list[ActionLog], kind: str) -> list[tu
 
 def _humanize_action(action: str) -> str:
     mapping = {
-        "room_create": "Habitacion creada",
-        "room_update": "Habitacion editada",
-        "room_delete": "Habitacion eliminada",
-        "guest_create": "Huesped creado",
-        "guest_update": "Huesped editado",
-        "guest_delete": "Huesped eliminado",
-        "login": "Inicio de sesion",
+        "room_create": "Habitación creada",
+        "room_update": "Habitación editada",
+        "room_delete": "Habitación eliminada",
+        "guest_create": "Huésped creado",
+        "guest_update": "Huésped editado",
+        "guest_delete": "Huésped eliminado",
+        "login": "Inicio de sesión",
         "pin_change": "Cambio de PIN",
     }
     return mapping.get(action, action)

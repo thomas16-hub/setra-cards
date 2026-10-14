@@ -130,7 +130,7 @@ class TestRenderReadResult:
     def test_global_master_estado_is_green_and_prominent(self):
         estado = "GLOBAL — abre todas las puertas (correcta)"
         info = _base_info(estado=estado)
-        root = cards_view._render_read_result(True, "Tarjeta leida", info)
+        root = cards_view._render_read_result(True, "Tarjeta leída", info)
         estado_texts = [t for t in collect_texts(root) if t.value == estado]
         assert estado_texts, "estado banner must be rendered"
         assert estado_texts[0].color == theme.SUCCESS
@@ -138,7 +138,7 @@ class TestRenderReadResult:
     def test_room_bound_master_estado_is_red(self):
         estado = "LIGADA a edif 1 piso 2 hab 3 — tarjeta vieja, RE-EMITIR"
         info = _base_info(estado=estado, building=1, floor=2, room_no_id=3)
-        root = cards_view._render_read_result(True, "Tarjeta leida", info)
+        root = cards_view._render_read_result(True, "Tarjeta leída", info)
         estado_texts = [t for t in collect_texts(root) if t.value == estado]
         assert estado_texts, "estado banner must be rendered"
         assert estado_texts[0].color == theme.ERROR
@@ -148,7 +148,7 @@ class TestRenderReadResult:
             tipo="Huésped", card_type_name="Guest", expired=True,
             building=1, floor=2, room_no_id=3,
         )
-        root = cards_view._render_read_result(True, "Tarjeta leida — VENCIDA", info)
+        root = cards_view._render_read_result(True, "Tarjeta leída — VENCIDA", info)
         joined = text_values(root)
         assert "VENCIDA" in joined
         assert "02/01/2026 12:00" in joined  # Valida desde
@@ -158,7 +158,7 @@ class TestRenderReadResult:
         info = _base_info(checksum_valid=False, uid_match=False)
         root = cards_view._render_read_result(True, "Tarjeta CORRUPTA (checksum inválido)", info)
         joined = text_values(root)
-        assert "CHECKSUM INVALIDO" in joined
+        assert "CHECKSUM INVÁLIDO" in joined
         assert "UID/DES NO COINCIDE" in joined
 
     def test_blank_card_badge_without_dates(self):
@@ -175,7 +175,7 @@ class TestRenderReadResult:
 
     def test_tipo_is_rendered(self):
         info = _base_info()
-        root = cards_view._render_read_result(True, "Tarjeta leida", info)
+        root = cards_view._render_read_result(True, "Tarjeta leída", info)
         assert "Maestra" in text_values(root)
 
 

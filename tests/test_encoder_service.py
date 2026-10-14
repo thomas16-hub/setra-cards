@@ -136,7 +136,7 @@ def test_auto_connect_hint_only_skips_scan_when_no_hint_ports(monkeypatch):
     )
     ok, msg = encoder_service.auto_connect(FakeState(), hint_only=True)
     assert ok is False
-    assert "No se detecto" in msg
+    assert "No se detectó" in msg
     assert calls == []  # never touched the serial layer
 
 

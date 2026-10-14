@@ -133,7 +133,7 @@ def _staff_card(page: ft.Page, s: Staff, on_change) -> ft.Container:
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.PHONE_OUTLINED, size=14, color=theme.TEXT_LIGHT),
-                        ft.Text(s.phone or "Sin telefono", size=12, color=theme.TEXT_MUTED),
+                        ft.Text(s.phone or "Sin teléfono", size=12, color=theme.TEXT_MUTED),
                     ],
                     spacing=6,
                 ),
@@ -176,7 +176,7 @@ def _open_staff_dialog(page: ft.Page, state, staff: Staff | None, on_done) -> No
     )
     doc = ft.TextField(label="Documento", value=(staff.document or "") if staff else "",
                        border_radius=theme.INPUT_RADIUS)
-    phone = ft.TextField(label="Telefono", value=(staff.phone or "") if staff else "",
+    phone = ft.TextField(label="Teléfono", value=(staff.phone or "") if staff else "",
                          border_radius=theme.INPUT_RADIUS)
     active = ft.Switch(label="Activo", value=(staff.active if staff else True), active_color=theme.PRIMARY)
 
@@ -245,7 +245,7 @@ def _open_staff_dialog(page: ft.Page, state, staff: Staff | None, on_done) -> No
             on_done()
 
         confirm_dialog(
-            page, f"Eliminar a {staff.name}?",
+            page, f"¿Eliminar a {staff.name}?",
             "Se eliminara el empleado. Las tarjetas emitidas quedan registradas.",
             on_confirm=do_delete, confirm_label="Eliminar", danger=True,
         )

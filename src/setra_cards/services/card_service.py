@@ -239,7 +239,7 @@ def create_guest_card(
             )
             log_action(
                 session, "card_guest", operator,
-                f"Hab. {room.display_number}, {guest.name if guest else '(sin huesped)'} hasta {valid_until:%Y-%m-%d %H:%M}",
+                f"Hab. {room.display_number}, {guest.name if guest else '(sin huésped)'} hasta {valid_until:%Y-%m-%d %H:%M}",
             )
         except Exception as exc:
             session.rollback()
@@ -276,7 +276,7 @@ def change_guest_room(
     para que aprenda la nueva habitacion.
     """
     if old_room.id == new_room.id:
-        return CardResult(False, "Guest", error="La habitacion destino es la misma")
+        return CardResult(False, "Guest", error="La habitación destino es la misma")
 
     # Whole read+rewrite is ONE encoder operation — fail-fast so it can never
     # interleave its read or its write with another in-flight operation.
@@ -289,7 +289,7 @@ def change_guest_room(
         if not decoded:
             if not getattr(encoder, "is_open", True):
                 return CardResult(False, "Guest", error=ENCODER_DISCONNECTED_ERROR)
-            return CardResult(False, "Guest", error="No se pudo leer la tarjeta. Coloquela en el encoder.")
+            return CardResult(False, "Guest", error="No se pudo leer la tarjeta. Colóquela en el encoder.")
         if not decoded.checksum_valid or not decoded.uid_match:
             return CardResult(
                 False, "Guest",
@@ -546,7 +546,7 @@ def create_setting_card(
             _log_emission(
                 session, "Setting", CARD_TYPE_SETTING, uid_hex, True, operator, room=room,
             )
-            log_action(session, "card_setting", operator, f"Habitacion {room.display_number}")
+            log_action(session, "card_setting", operator, f"Habitación {room.display_number}")
         except Exception as exc:
             session.rollback()
             logger.exception("DB audit failed after successful setting card write")
@@ -824,9 +824,9 @@ def read_existing_card(
     elif decoded.card_type in LEGACY_GLOBAL_TYPES:
         message = "Tarjeta antigua — RE-EMITIR"
     elif expired:
-        message = "Tarjeta leida — VENCIDA"
+        message = "Tarjeta leída — VENCIDA"
     else:
-        message = "Tarjeta leida"
+        message = "Tarjeta leída"
     return True, message, info
 
 
@@ -851,7 +851,7 @@ def read_s70_data_card(
     with emission_transaction(blocking=True):
         data = read_s70_card(encoder, hotel.signature)
     if data is None:
-        return False, "No se detecto tarjeta en el encoder", {}
+        return False, "No se detectó tarjeta en el encoder", {}
     if not data.is_s70:
         return False, f"La tarjeta no es S70 Data Card (marca: '{data.marker}')", {}
 
@@ -929,7 +929,7 @@ def read_s70_data_card(
         "events": enriched_events,
         "new_count": new_count,
     }
-    return True, f"{len(data.events)} eventos leidos ({new_count} nuevos)", info
+    return True, f"{len(data.events)} eventos leídos ({new_count} nuevos)", info
 
 
 def active_cards_for_room(session: Session, room: Room, now: datetime | None = None) -> list[CardLog]:

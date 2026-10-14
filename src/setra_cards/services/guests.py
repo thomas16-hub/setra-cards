@@ -53,7 +53,7 @@ def create_guest(
 ) -> Guest:
     name_clean = (name or "").strip()
     if not name_clean:
-        raise ValueError("Nombre del huesped es obligatorio")
+        raise ValueError("Nombre del huésped es obligatorio")
     g = Guest(
         name=name_clean,
         document=(document or "").strip() or None,
@@ -79,7 +79,7 @@ def update_guest(
 ) -> Guest:
     g = session.get(Guest, guest_id)
     if not g:
-        raise ValueError("Huesped no existe")
+        raise ValueError("Huésped no existe")
     if name is not None:
         g.name = name.strip() or g.name
     if document is not None:

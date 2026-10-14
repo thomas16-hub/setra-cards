@@ -13,12 +13,12 @@ from setra_cards.ui import theme
 _ALL_NAV_ITEMS = [
     ("dashboard", "Hub",            ft.Icons.GRID_VIEW_OUTLINED,      None),
     ("rooms",     "Habitaciones",   ft.Icons.HOTEL_OUTLINED,           None),
-    ("guests",    "Huespedes",      ft.Icons.PEOPLE_OUTLINED,          None),
+    ("guests",    "Huéspedes",      ft.Icons.PEOPLE_OUTLINED,          None),
     ("cards",     "Emitir tarjeta", ft.Icons.CREDIT_CARD,              None),
     ("staff",     "Personal",       ft.Icons.BADGE_OUTLINED,           "manager"),
     ("activity",  "Actividad",      ft.Icons.RECEIPT_LONG_OUTLINED,    "manager"),
     ("reports",   "Reportes",       ft.Icons.BAR_CHART_OUTLINED,       "manager"),
-    ("admin",     "Administracion", ft.Icons.SETTINGS_OUTLINED,        "manager"),
+    ("admin",     "Administración", ft.Icons.SETTINGS_OUTLINED,        "manager"),
 ]
 
 
@@ -236,7 +236,7 @@ def open_shell(page: ft.Page) -> None:
                 operator_badge,
                 ft.Container(
                     content=ft.TextButton(
-                        content=ft.Text("Cerrar sesion", color=theme.TEXT_MUTED),
+                        content=ft.Text("Cerrar sesión", color=theme.TEXT_MUTED),
                         icon=ft.Icons.LOGOUT,
                         on_click=do_logout,
                         style=ft.ButtonStyle(color=theme.TEXT_MUTED),

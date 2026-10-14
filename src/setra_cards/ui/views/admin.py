@@ -37,14 +37,14 @@ def build(page: ft.Page) -> ft.Control:
             content=ft.Column([
                 ft.Icon(ft.Icons.LOCK_OUTLINED, size=48, color=theme.TEXT_MUTED),
                 ft.Text("Acceso restringido", size=18, weight=ft.FontWeight.W_600, color=theme.TEXT),
-                ft.Text("Se requiere rol Manager o superior.", size=13, color=theme.TEXT_MUTED),
+                ft.Text("Esta sección es solo para gerentes.", size=13, color=theme.TEXT_MUTED),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                alignment=ft.MainAxisAlignment.CENTER, spacing=12),
             alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
-    header = PageHeader(title="Administracion", subtitle="Configuracion y mantenimiento")
+    header = PageHeader(title="Administración", subtitle="Configuración y mantenimiento")
 
     return ft.Container(
         content=ft.Column(
@@ -144,7 +144,7 @@ def _encoder_section(page: ft.Page) -> ft.Control:
         show_toast(
             page,
             f"Puerto {port} liberado — ya puedes usar el software Locstar. "
-            "Para volver a usar el encoder aqui, presiona 'Detectar automaticamente'.",
+            "Para volver a usar el encoder aquí, presiona 'Detectar automáticamente'.",
             "success",
         )
         refresh()
@@ -160,7 +160,7 @@ def _encoder_section(page: ft.Page) -> ft.Control:
         actions=[
             SecondaryButton("Liberar puerto", icon=ft.Icons.USB_OFF, on_click=do_release),
             SecondaryButton("Reescanear", icon=ft.Icons.REFRESH, on_click=lambda e: refresh()),
-            PrimaryButton("Detectar automaticamente", icon=ft.Icons.AUTO_AWESOME, on_click=do_auto),
+            PrimaryButton("Detectar automáticamente", icon=ft.Icons.AUTO_AWESOME, on_click=do_auto),
         ],
         content=ft.Column(
             [
@@ -199,7 +199,7 @@ def _encoder_section(page: ft.Page) -> ft.Control:
 
 def _port_row(page: ft.Page, info, is_current: bool, on_done) -> ft.Container:
     state = get_state()
-    description = " · ".join(filter(None, [info.description, info.manufacturer])) or "Sin descripcion"
+    description = " · ".join(filter(None, [info.description, info.manufacturer])) or "Sin descripción"
 
     def use_this(e: ft.ControlEvent) -> None:
         ok, msg = encoder_service.connect_port(state, info.device)
@@ -307,7 +307,7 @@ def _op_row(page: ft.Page, op: Operator, on_change) -> ft.Control:
                             else Badge("Inactivo", theme.TEXT_MUTED, theme.SURFACE_ALT),
                         ], spacing=6),
                         ft.Text(
-                            "Debe cambiar PIN al iniciar sesion" if op.must_change_pin else "PIN configurado",
+                            "Debe cambiar PIN al iniciar sesión" if op.must_change_pin else "PIN configurado",
                             size=11,
                             color=theme.WARNING if op.must_change_pin else theme.TEXT_MUTED,
                         ),
@@ -359,7 +359,7 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
     pin = ft.TextField(
         label="PIN nuevo" if not is_new else "PIN inicial",
         password=True, can_reveal_password=True,
-        hint_text="Dejar vacio para no cambiar" if not is_new else "Minimo 4 caracteres",
+        hint_text="Dejar vacío para no cambiar" if not is_new else "Mínimo 4 caracteres",
         border_radius=theme.INPUT_RADIUS,
     )
     active = ft.Switch(label="Activo", value=(op.active if op else True), active_color=theme.PRIMARY)
@@ -429,7 +429,7 @@ def _open_operator_dialog(page: ft.Page, state, op: Operator | None, on_done) ->
 
         confirm_dialog(
             page, f"Eliminar operador {op.name}?",
-            "Esta accion no se puede deshacer.",
+            "Esta acción no se puede deshacer.",
             on_confirm=do_delete, confirm_label="Eliminar", danger=True,
         )
 
@@ -568,8 +568,8 @@ def _updates_section(page: ft.Page) -> ft.Control:
                         show_toast(page, f"Error aplicando: {exc}", "error")
 
                 confirm_dialog(
-                    page, f"Instalar version {result.latest.version}?",
-                    "La aplicacion se cerrara y volvera a abrir con la nueva version.",
+                    page, f"¿Instalar la versión {result.latest.version}?",
+                    "La aplicación se cerrará y volverá a abrir con la nueva versión.",
                     on_confirm=really_apply, confirm_label="Instalar",
                 )
 
@@ -580,7 +580,7 @@ def _updates_section(page: ft.Page) -> ft.Control:
                 content=ft.Column([
                     ft.Row([
                         ft.Icon(ft.Icons.NEW_RELEASES, size=18, color=theme.ACCENT),
-                        ft.Text(f"Nueva version disponible: {result.latest.version}",
+                        ft.Text(f"Nueva versión disponible: {result.latest.version}",
                                 size=13, weight=ft.FontWeight.W_600, color=theme.ACCENT),
                     ], spacing=8),
                     ft.Text(f"Instalada: {result.current_version}", size=11, color=theme.TEXT_MUTED),
@@ -596,19 +596,19 @@ def _updates_section(page: ft.Page) -> ft.Control:
         else:
             status.content = ft.Row([
                 ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=theme.SUCCESS),
-                ft.Text(f"Estas en la ultima version ({result.current_version})",
+                ft.Text(f"Estás en la última versión ({result.current_version})",
                         size=12, color=theme.SUCCESS, weight=ft.FontWeight.W_500),
             ], spacing=8)
         page.update()
 
     return SectionCard(
         title="Actualizaciones",
-        actions=[PrimaryButton("Buscar actualizacion", icon=ft.Icons.REFRESH, on_click=do_check)],
+        actions=[PrimaryButton("Buscar actualización", icon=ft.Icons.REFRESH, on_click=do_check)],
         content=ft.Column([
             ft.Text(
-                "La app NO se actualiza sola: al iniciar solo verifica si hay una version "
-                "nueva (aviso en el log). Para instalar, presiona 'Buscar actualizacion' y "
-                "confirma. Si el canal de actualizaciones no esta disponible, contacta a "
+                "La app NO se actualiza sola: al iniciar solo verifica si hay una versión "
+                "nueva (aviso en el log). Para instalar, presiona 'Buscar actualización' y "
+                "confirma. Si el canal de actualizaciones no está disponible, contacta a "
                 "soporte SETRA.",
                 size=12, color=theme.TEXT_MUTED,
             ),
@@ -623,11 +623,11 @@ def _updates_section(page: ft.Page) -> ft.Control:
 def _about_section(page: ft.Page) -> ft.Control:
     state = get_state()
     return SectionCard(
-        title="Acerca de la aplicacion",
+        title="Acerca de la aplicación",
         content=ft.Column(
             [
                 ft.Row([
-                    ft.Text("Version:", size=12, color=theme.TEXT_MUTED),
+                    ft.Text("Versión:", size=12, color=theme.TEXT_MUTED),
                     ft.Text(__version__, size=12, color=theme.TEXT, weight=ft.FontWeight.W_600),
                 ], spacing=8),
                 ft.Row([

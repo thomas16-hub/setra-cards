@@ -97,7 +97,7 @@ def test_read_existing_card_exposes_real_dates_and_flags(monkeypatch, encoder, h
     ok, msg, info = cs.read_existing_card(encoder=encoder, hotel=hotel)
 
     assert ok is True
-    assert msg == "Tarjeta leida"
+    assert msg == "Tarjeta leída"
     assert info["valid_from"] == d1
     assert info["valid_until"] == d2
     assert info["card_type_name"] == "Guest"

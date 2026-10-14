@@ -26,7 +26,7 @@ from setra_cards.ui.components.basics import _page_open, _page_close
 STATE_LABELS = {
     "limpia":            ("Limpia",           theme.SUCCESS,   theme.SURFACE_ALT),
     "sucia":             ("Sucia",            theme.WARNING,   theme.SURFACE_ALT),
-    "inspeccion":        ("Inspeccion",       theme.ACCENT,    theme.SURFACE_ALT),
+    "inspeccion":        ("Inspección",       theme.ACCENT,    theme.SURFACE_ALT),
     "mantenimiento":     ("Mantenimiento",    "#8E44AD",       theme.SURFACE_ALT),
     "fuera_de_servicio": ("Fuera de servicio",theme.ERROR,     theme.SURFACE_ALT),
 }
@@ -63,7 +63,7 @@ def build(page: ft.Page) -> ft.Control:
             host.controls.append(
                 SectionCard(content=EmptyState(
                     "No hay habitaciones que coincidan",
-                    "Cambia el filtro o agrega una habitacion nueva.",
+                    "Cambia el filtro o agrega una habitación nueva.",
                     icon=ft.Icons.HOTEL_OUTLINED,
                 ))
             )
@@ -87,7 +87,7 @@ def build(page: ft.Page) -> ft.Control:
     header_actions: list[ft.Control] = []
     if can_manage:
         header_actions.append(
-            PrimaryButton("Nueva habitacion", on_click=open_new_room, icon=ft.Icons.ADD)
+            PrimaryButton("Nueva habitación", on_click=open_new_room, icon=ft.Icons.ADD)
         )
     header = PageHeader(
         title="Habitaciones",
@@ -118,7 +118,7 @@ def _summary_bar(counts: dict[str, int]) -> ft.Control:
             StatCard("Total", total, "configuradas", icon=ft.Icons.HOTEL_OUTLINED),
             StatCard("Limpias", counts.get("limpia", 0), "disponibles", color=theme.SUCCESS, icon=ft.Icons.CHECK_CIRCLE),
             StatCard("Sucias", counts.get("sucia", 0), "pendientes limpieza", color=theme.WARNING, icon=ft.Icons.CLEANING_SERVICES),
-            StatCard("Mantenimiento", counts.get("mantenimiento", 0) + counts.get("fuera_de_servicio", 0), "fuera de operacion", color=theme.ERROR, icon=ft.Icons.BUILD),
+            StatCard("Mantenimiento", counts.get("mantenimiento", 0) + counts.get("fuera_de_servicio", 0), "fuera de operación", color=theme.ERROR, icon=ft.Icons.BUILD),
         ],
         spacing=16,
     )
@@ -126,7 +126,7 @@ def _summary_bar(counts: dict[str, int]) -> ft.Control:
 
 def _filter_bar(page: ft.Page, state_filter: dict, search_query: dict, on_change) -> ft.Control:
     search = ft.TextField(
-        hint_text="Buscar habitacion por numero...",
+        hint_text="Buscar habitación por número...",
         prefix_icon=ft.Icons.SEARCH,
         border_radius=theme.INPUT_RADIUS,
         height=42,
@@ -292,7 +292,7 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
         return
 
     display = ft.TextField(
-        label="Numero de habitacion",
+        label="Número de habitación",
         value=room.display_number if room else "",
         autofocus=is_new,
         border_radius=theme.INPUT_RADIUS,
@@ -339,7 +339,7 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
                     )
                     log_action(s, "room_create", state.operator.name if state.operator else "?",
                                f"Hab. {r.display_number}")
-                    show_toast(page, f"Habitacion {r.display_number} creada", "success")
+                    show_toast(page, f"Habitación {r.display_number} creada", "success")
                 else:
                     rooms_service.update_room(
                         s,
@@ -352,7 +352,7 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
                     )
                     log_action(s, "room_update", state.operator.name if state.operator else "?",
                                f"Hab. {display.value}")
-                    show_toast(page, "Habitacion actualizada", "success")
+                    show_toast(page, "Habitación actualizada", "success")
             except ValueError as exc:
                 show_toast(page, str(exc), "error")
                 return
@@ -376,14 +376,14 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
                     return
                 log_action(s, "room_delete", state.operator.name if state.operator else "?",
                            f"Hab. {room.display_number}")
-            show_toast(page, f"Habitacion {room.display_number} eliminada", "info")
+            show_toast(page, f"Habitación {room.display_number} eliminada", "info")
             _page_close(page, dlg)
             on_done()
 
         confirm_dialog(
             page,
-            f"Eliminar habitacion {room.display_number}?",
-            "Esta accion no se puede deshacer. El historico de tarjetas se conserva.",
+            f"Eliminar habitación {room.display_number}?",
+            "Esta acción no se puede deshacer. El histórico de tarjetas se conserva.",
             on_confirm=do_delete,
             confirm_label="Eliminar",
             danger=True,
@@ -426,7 +426,7 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
     dlg = ft.AlertDialog(
         modal=True,
         title=ft.Text(
-            "Editar habitacion" if not is_new else "Nueva habitacion",
+            "Editar habitación" if not is_new else "Nueva habitación",
             size=18, weight=ft.FontWeight.W_600, color=theme.TEXT,
         ),
         content=ft.Container(

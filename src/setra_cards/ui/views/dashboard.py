@@ -11,6 +11,7 @@ from setra_cards.services import rooms as rooms_service
 from setra_cards.services.action_log import log as log_action
 from setra_cards.services.auth import role_has_access
 from setra_cards.services.card_service import (
+    CardResult,
     blank_existing_card,
     create_guest_card,
     invalidate_active_guest_cards,
@@ -27,14 +28,25 @@ from setra_cards.ui.components.basics import (
     make_busy_guard,
     show_toast,
 )
+from setra_cards.ui.components.card_write import run_card_write
+from setra_cards.ui.components.pickers import DateTimeField, format_moment
 
-STATE_LABELS = {
-    "limpia":            ("Limpia",          theme.SUCCESS,    theme.SURFACE_ALT),
-    "sucia":             ("Sucia",           theme.WARNING,    theme.SURFACE_ALT),
-    "inspeccion":        ("Inspeccion",      theme.INFO,       theme.SURFACE_ALT),
-    "mantenimiento":     ("Mantenimiento",   "#8E44AD",        theme.SURFACE_ALT),
-    "fuera_de_servicio": ("Fuera servicio",  theme.ERROR,      theme.SURFACE_ALT),
+MAINTENANCE_COLOR = "#B07CD8"
+
+# Room housekeeping state -> (label, colour). Order = legend order.
+ROOM_STATES = {
+    "limpia":            ("Limpia",            theme.SUCCESS),
+    "sucia":             ("Sucia",             theme.WARNING),
+    "inspeccion":        ("Inspección",        theme.INFO),
+    "mantenimiento":     ("Mantenimiento",     MAINTENANCE_COLOR),
+    "fuera_de_servicio": ("Fuera de servicio", theme.ERROR),
 }
+# Used by the room action dialog: (label, colour, background).
+STATE_LABELS = {k: (label, color, theme.SURFACE_ALT) for k, (label, color) in ROOM_STATES.items()}
+
+OCCUPIED_BG = "#2A2412"
+TILE_WIDTH = 124
+TILE_HEIGHT = 76
 
 
 def _blank_guest_card_for_checkout(*, encoder, hotel, session, operator, room=None):
@@ -65,7 +77,7 @@ def _finish_checkout(session, room: dict, operator: str, action: str) -> None:
     invalidate_active_guest_cards(session, room["id"], legacy_display=room["display_number"])
     r = session.get(Room, room["id"])
     if r is None:
-        raise ValueError("Habitacion no existe")
+        raise ValueError("Habitación no existe")
     r.state = "sucia"
     log_action(session, action, operator, f"Hab. {room['display_number']}")
 
@@ -128,85 +140,59 @@ def build(page: ft.Page) -> ft.Control:
 
         occupied_count = sum(1 for rd in rooms_data if rd["id"] in active_by_room)
         free = rooms_count - occupied_count
-        active_cards_count = len(active_by_room)
 
-        encoder_ok = state.encoder is not None
-        encoder_port = state.encoder_port or "—"
-
-        # ── Barra de estado encoder ──
-        enc_bar = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(
-                        ft.Icons.USB if encoder_ok else ft.Icons.USB_OFF,
-                        size=16,
-                        color=theme.SUCCESS if encoder_ok else theme.WARNING,
-                    ),
-                    ft.Text(
-                        f"Encoder: {encoder_port}" if encoder_ok else "Encoder no conectado — ve a Administracion",
-                        size=12,
-                        color=theme.SUCCESS if encoder_ok else theme.WARNING,
-                        weight=ft.FontWeight.W_600,
-                    ),
-                ],
-                spacing=8,
-            ),
-            padding=ft.Padding(14, 10, 14, 10),
-            bgcolor=theme.SURFACE,
-            border=ft.Border.all(1, theme.BORDER),
-            border_radius=10,
-        )
-
-        # ── Stats row ──
-        def stat(label: str, val: str, color: str = theme.TEXT) -> ft.Container:
-            return ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(val, size=26, weight=ft.FontWeight.BOLD, color=color),
-                        ft.Text(label, size=11, color=theme.TEXT_MUTED),
-                    ],
-                    spacing=2,
-                    tight=True,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.Padding(20, 16, 20, 16),
-                bgcolor=theme.SURFACE,
-                border=ft.Border.all(1, theme.BORDER),
-                border_radius=theme.CARD_RADIUS,
-                expand=True,
-            )
-
-        stats_row = ft.Row(
+        header = ft.Row(
             [
-                stat("Habitaciones", str(rooms_count)),
-                stat("Ocupadas", str(occupied_count), theme.ERROR if occupied_count else theme.TEXT),
-                stat("Libres", str(free), theme.SUCCESS),
-                stat("Tarjetas activas", str(active_cards_count), theme.GOLD),
-                stat("Huespedes", str(guests_count)),
+                ft.Column(
+                    [
+                        ft.Text("Hub", size=26, weight=ft.FontWeight.BOLD,
+                                color=theme.GOLD_LIGHT, font_family=theme.FONT_DISPLAY),
+                        ft.Text(state.hotel.name, size=12, color=theme.TEXT_MUTED),
+                    ],
+                    spacing=0,
+                    tight=True,
+                    expand=True,
+                ),
+                _encoder_pill(state),
+                ft.IconButton(
+                    icon=ft.Icons.REFRESH,
+                    icon_color=theme.TEXT_MUTED,
+                    icon_size=20,
+                    tooltip="Actualizar",
+                    on_click=lambda e: refresh(),
+                ),
             ],
-            spacing=12,
-        )
-
-        # ── Grid de habitaciones ──
-        grid = ft.GridView(
-            controls=[
-                _room_tile(page, rd, active_by_room.get(rd["id"]), sf, state, refresh)
-                for rd in rooms_data
-            ],
-            runs_count=6,
-            max_extent=190,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=10,
-            run_spacing=10,
-            child_aspect_ratio=1.0,
         )
 
-        if not rooms_data:
-            grid = ft.Container(
+        summary = ft.Row(
+            [
+                _metric(str(rooms_count), "habitaciones"),
+                _metric(str(occupied_count), "ocupadas", theme.GOLD_LIGHT),
+                _metric(str(free), "libres", theme.SUCCESS),
+                _metric(str(guests_count), "huéspedes registrados"),
+            ],
+            spacing=28,
+            wrap=True,
+        )
+
+        if rooms_data:
+            body: ft.Control = ft.Column(
+                [_legend(rooms_data, active_by_room), ft.Container(height=4)]
+                + [
+                    _floor_row(page, floor, floor_rooms, active_by_room, sf, state, refresh)
+                    for floor, floor_rooms in _group_by_floor(rooms_data)
+                ],
+                spacing=10,
+            )
+        else:
+            body = ft.Container(
                 content=ft.Column(
                     [
                         ft.Icon(ft.Icons.HOTEL_OUTLINED, size=40, color=theme.TEXT_LIGHT),
                         ft.Text("Sin habitaciones configuradas", size=14, color=theme.TEXT_MUTED),
-                        ft.Text("Ve a Habitaciones para agregar", size=12, color=theme.TEXT_LIGHT),
+                        ft.Text("Ve a Habitaciones para agregarlas", size=12, color=theme.TEXT_LIGHT),
                     ],
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                     spacing=8,
@@ -216,36 +202,11 @@ def build(page: ft.Page) -> ft.Control:
             )
 
         host.controls = [
-            ft.Row(
-                [
-                    ft.Column(
-                        [
-                            ft.Text("Hub Operativo", size=26, weight=ft.FontWeight.BOLD,
-                                    color=theme.GOLD_LIGHT, font_family=theme.FONT_DISPLAY),
-                            ft.Text(state.hotel.name, size=12, color=theme.TEXT_MUTED),
-                        ],
-                        spacing=2,
-                        tight=True,
-                        expand=True,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.REFRESH,
-                        icon_color=theme.TEXT_MUTED,
-                        icon_size=20,
-                        tooltip="Actualizar",
-                        on_click=lambda e: refresh(),
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            ),
-            ft.Container(height=12),
-            enc_bar,
-            ft.Container(height=12),
-            stats_row,
-            ft.Container(height=16),
-            ft.Text("HABITACIONES", size=10, weight=ft.FontWeight.W_700, color=theme.TEXT_LIGHT),
-            ft.Container(height=8),
-            grid,
+            header,
+            ft.Container(height=10),
+            summary,
+            ft.Container(height=14),
+            body,
         ]
         page.update()
 
@@ -253,33 +214,123 @@ def build(page: ft.Page) -> ft.Control:
     return ft.Container(content=host, expand=True, padding=theme.PADDING_LG)
 
 
-def _room_tile(page, room: dict, active_info: "dict | None", sf, state, refresh) -> ft.Container:
-    """room y active_info son dicts planos — sin ORM detached."""
-    room_state = room["state"]
-    label, fg, _ = STATE_LABELS.get(room_state, ("Otro", theme.TEXT_MUTED, theme.SURFACE_ALT))
-
-    occupied = active_info is not None
-    guest_name = active_info["guest_name"] if active_info else ""
-    checkout_str = (
-        active_info["expires_at"].strftime("%d/%m %H:%M")
-        if active_info and active_info["expires_at"] else ""
+def _encoder_pill(state) -> ft.Container:
+    ok = state.encoder is not None
+    color = theme.SUCCESS if ok else theme.WARNING
+    text = f"Encoder {state.encoder_port}" if ok else "Encoder no conectado"
+    return ft.Container(
+        content=ft.Row(
+            [ft.Icon(ft.Icons.USB if ok else ft.Icons.USB_OFF, size=15, color=color),
+             ft.Text(text, size=12, color=color, weight=ft.FontWeight.W_600)],
+            spacing=6,
+            tight=True,
+        ),
+        padding=ft.Padding(12, 6, 12, 6),
+        border=ft.Border.all(1, color),
+        border_radius=999,
+        tooltip=None if ok else "Ve a Administración y presiona Detectar automáticamente",
     )
 
-    STATE_TILE = {
-        "limpia":            ("#0D2B1A", "#1A7A4A", theme.SUCCESS),
-        "sucia":             ("#2B1F0A", "#7A5A1A", theme.WARNING),
-        "inspeccion":        ("#0A1F2B", "#1A5A7A", theme.INFO),
-        "mantenimiento":     ("#1F0A2B", "#5A1A7A", "#8E44AD"),
-        "fuera_de_servicio": ("#2B0A0A", "#7A1A1A", theme.ERROR),
-    }
-    tile_bg, tile_border, state_color = STATE_TILE.get(room_state, (theme.SURFACE, theme.BORDER, theme.TEXT_MUTED))
+
+def _metric(value: str, label: str, color: str = theme.TEXT) -> ft.Row:
+    return ft.Row(
+        [
+            ft.Text(value, size=22, weight=ft.FontWeight.BOLD, color=color),
+            ft.Text(label, size=12, color=theme.TEXT_MUTED),
+        ],
+        spacing=6,
+        tight=True,
+        vertical_alignment=ft.CrossAxisAlignment.END,
+    )
+
+
+def _display_sort_key(display: str) -> tuple:
+    digits = "".join(ch for ch in display if ch.isdigit())
+    return (int(digits) if digits else 0, display)
+
+
+def _group_by_floor(rooms_data: list[dict]) -> list[tuple[int, list[dict]]]:
+    floors: dict[int, list[dict]] = {}
+    for rd in rooms_data:
+        floors.setdefault(rd["floor"], []).append(rd)
+    return [
+        (floor, sorted(rooms, key=lambda r: _display_sort_key(r["display_number"])))
+        for floor, rooms in sorted(floors.items())
+    ]
+
+
+def _swatch(color: str, occupied: bool = False) -> ft.Container:
+    if occupied:
+        return ft.Container(width=14, height=14, bgcolor=OCCUPIED_BG,
+                            border=ft.Border.all(2, theme.GOLD), border_radius=4)
+    return ft.Container(width=10, height=10, bgcolor=color, border_radius=5)
+
+
+def _legend(rooms_data: list[dict], active_by_room: dict) -> ft.Control:
+    """What each colour means, with how many rooms are in that state now."""
+    occupied = sum(1 for rd in rooms_data if rd["id"] in active_by_room)
+    items: list[ft.Control] = [_legend_item(_swatch(theme.GOLD, occupied=True), "Ocupada", occupied)]
+    for key, (label, color) in ROOM_STATES.items():
+        count = sum(1 for rd in rooms_data if rd["state"] == key and rd["id"] not in active_by_room)
+        items.append(_legend_item(_swatch(color), label, count))
+    return ft.Row(items, spacing=18, run_spacing=6, wrap=True)
+
+
+def _legend_item(swatch: ft.Control, label: str, count: int) -> ft.Row:
+    return ft.Row(
+        [swatch,
+         ft.Text(label, size=12, color=theme.TEXT_MUTED),
+         ft.Text(str(count), size=12, color=theme.TEXT, weight=ft.FontWeight.W_700)],
+        spacing=6,
+        tight=True,
+        opacity=1.0 if count else 0.45,
+    )
+
+
+def _floor_row(page, floor: int, rooms: list[dict], active_by_room: dict, sf, state, refresh) -> ft.Control:
+    occupied = sum(1 for rd in rooms if rd["id"] in active_by_room)
+    return ft.Row(
+        [
+            ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(f"PISO {floor}", size=11, weight=ft.FontWeight.W_700, color=theme.TEXT_MUTED),
+                        ft.Text(f"{occupied}/{len(rooms)} ocup.", size=10, color=theme.TEXT_LIGHT),
+                    ],
+                    spacing=2,
+                    tight=True,
+                ),
+                width=70,
+                padding=ft.Padding(0, 10, 0, 0),
+            ),
+            ft.Row(
+                [_room_tile(page, rd, active_by_room.get(rd["id"]), sf, state, refresh) for rd in rooms],
+                spacing=8,
+                run_spacing=8,
+                wrap=True,
+                expand=True,
+            ),
+        ],
+        vertical_alignment=ft.CrossAxisAlignment.START,
+        spacing=8,
+    )
+
+
+def _room_tile(page, room: dict, active_info: "dict | None", sf, state, refresh) -> ft.Container:
+    """room y active_info son dicts planos — sin ORM detached."""
+    label, state_color = ROOM_STATES.get(room["state"], ("Otro", theme.TEXT_MUTED))
+    occupied = active_info is not None
 
     if occupied:
-        tile_bg = "#1A1400"
-        tile_border = theme.GOLD
-        dot_color = theme.GOLD
+        guest = active_info["guest_name"] or "Ocupada"
+        until = active_info["expires_at"]
+        lower: list[ft.Control] = [
+            ft.Text(guest, size=11, color=theme.GOLD_LIGHT, weight=ft.FontWeight.W_600,
+                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(f"sale {until:%d/%m %H:%M}" if until else "", size=10, color=theme.TEXT_MUTED),
+        ]
     else:
-        dot_color = state_color
+        lower = [ft.Text(label, size=11, color=state_color, weight=ft.FontWeight.W_600)]
 
     def on_click(e: ft.ControlEvent) -> None:
         _open_room_action(page, room, active_info, sf, state, refresh)
@@ -289,31 +340,23 @@ def _room_tile(page, room: dict, active_info: "dict | None", sf, state, refresh)
             [
                 ft.Row(
                     [
-                        ft.Text(room["display_number"], size=20, weight=ft.FontWeight.BOLD, color=theme.TEXT),
-                        ft.Container(width=10, height=10, bgcolor=dot_color, border_radius=5),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                ft.Row(
-                    [
-                        ft.Text(f"Piso {room['floor']}", size=10, color=theme.TEXT_LIGHT),
-                        ft.Text(f"#{room['sequential_id']}", size=10, color=theme.TEXT_LIGHT),
+                        ft.Text(room["display_number"], size=18, weight=ft.FontWeight.BOLD, color=theme.TEXT),
+                        _swatch(state_color),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
                 ft.Container(expand=True),
-                ft.Text(guest_name, size=11, color=theme.GOLD_LIGHT, weight=ft.FontWeight.W_600,
-                        overflow=ft.TextOverflow.ELLIPSIS) if guest_name else ft.Container(),
-                ft.Text(f"⏱ {checkout_str}", size=10, color=theme.TEXT_MUTED) if checkout_str else ft.Container(),
-                Badge(label, color=state_color, bg=tile_bg),
+                *lower,
             ],
-            spacing=4,
-            expand=True,
+            spacing=1,
         ),
-        padding=ft.Padding(12, 10, 12, 10),
-        bgcolor=tile_bg,
-        border=ft.Border.all(1, tile_border),
-        border_radius=theme.CARD_RADIUS,
+        width=TILE_WIDTH,
+        height=TILE_HEIGHT,
+        padding=ft.Padding(10, 8, 10, 8),
+        bgcolor=OCCUPIED_BG if occupied else theme.SURFACE,
+        border=ft.Border.all(1.5 if occupied else 1, theme.GOLD if occupied else theme.BORDER),
+        border_radius=10,
+        tooltip=f"Hab. {room['display_number']} · {label}" + (" · ocupada" if occupied else ""),
         on_click=on_click,
         ink=True,
     )
@@ -514,13 +557,15 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
 
 
 def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
-    days_val = {"v": 1}
-
+    max_nights = 30
     checkout_time = state.hotel.checkout_time if state.hotel else "12:00"
     try:
         h, m = [int(x) for x in checkout_time.split(":")]
     except Exception:
         h, m = 12, 0
+
+    def checkout_after(nights: int) -> datetime:
+        return (datetime.now() + timedelta(days=nights)).replace(hour=h, minute=m, second=0, microsecond=0)
 
     # Guest dropdown
     with sf() as s:
@@ -530,7 +575,7 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         ]
 
     guest_dd = ft.Dropdown(
-        label="Huesped",
+        label="Huésped",
         options=guest_options,
         value="",
         border_radius=theme.INPUT_RADIUS,
@@ -538,22 +583,26 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
 
     days_display = ft.Text("1 noche", size=13, color=theme.GOLD_LIGHT,
                            weight=ft.FontWeight.W_600)
-    checkout_display = ft.Text(
-        (datetime.now() + timedelta(days=1)).replace(hour=h, minute=m).strftime("%d/%m/%Y %H:%M"),
-        size=12, color=theme.TEXT_MUTED,
-    )
+
+    def nights_label(nights: int) -> str:
+        return f"{nights} noche{'s' if nights != 1 else ''}"
+
+    def on_checkout_picked(value: datetime) -> None:
+        nights = (value.date() - datetime.now().date()).days
+        if 1 <= nights <= max_nights:
+            days_slider.value = nights
+        days_display.value = nights_label(max(nights, 0))
+
+    checkout_field = DateTimeField(page, "Salida", checkout_after(1), on_change=on_checkout_picked)
 
     def on_days_change(e):
         d = int(float(e.control.value))
-        days_val["v"] = d
-        days_display.value = f"{d} noche{'s' if d > 1 else ''}"
-        co = datetime.now() + timedelta(days=d)
-        co = co.replace(hour=h, minute=m, second=0)
-        checkout_display.value = co.strftime("%d/%m/%Y %H:%M")
+        days_display.value = nights_label(d)
+        checkout_field.set_value(checkout_after(d))
         page.update()
 
     days_slider = ft.Slider(
-        min=1, max=30, divisions=29, value=1,
+        min=1, max=max_nights, divisions=max_nights - 1, value=1,
         active_color=theme.GOLD, thumb_color=theme.GOLD,
         on_change=on_days_change,
     )
@@ -567,9 +616,13 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
         if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
+        checkout = checkout_field.value
+        if checkout <= datetime.now():
+            show_toast(page, "La salida debe ser en el futuro", "error")
+            return
         _page_close(page, dlg)
-        d = days_val["v"]
         guest_id = int(guest_dd.value) if guest_dd.value else None
+        guest_label = next((o.text for o in guest_dd.options if o.key == guest_dd.value), "")
         from types import SimpleNamespace
         room_ns = SimpleNamespace(
             id=room["id"],
@@ -580,36 +633,46 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
             room_no_id=room.get("room_no_id", 1),
         )
         op_name = state.operator.name if state.operator else "?"
-        with sf() as s:
-            guest = s.get(Guest, guest_id) if guest_id else None
-            result = create_guest_card(
-                encoder=enc,
-                hotel=state.hotel,
-                session=s,
-                room=room_ns,
-                guest=guest,
-                valid_from=datetime.now(),
-                valid_until=datetime.now().replace(hour=h, minute=m) + timedelta(days=d),
-                operator=op_name,
-            )
-            if result.ok:
-                log_action(s, "checkin", op_name,
-                           f"Hab. {room['display_number']}, {d}d")
-        if result.ok:
-            show_toast(page, f"Check-in hab. {room['display_number']} OK — UID {result.uid_hex}", "success")
-        else:
-            show_toast(page, result.error or "Error al emitir tarjeta", "error")
-        refresh()
+
+        def write():
+            with sf() as s:
+                guest = s.get(Guest, guest_id) if guest_id else None
+                result = create_guest_card(
+                    encoder=enc,
+                    hotel=state.hotel,
+                    session=s,
+                    room=room_ns,
+                    guest=guest,
+                    valid_from=datetime.now(),
+                    valid_until=checkout,
+                    operator=op_name,
+                )
+                if result.ok:
+                    nights = (checkout.date() - datetime.now().date()).days
+                    log_action(s, "checkin", op_name,
+                               f"Hab. {room['display_number']}, {nights}d")
+            return result
+
+        run_card_write(
+            page,
+            title=f"Check-in · Hab. {room['display_number']}",
+            op=write,
+            details=[("Habitación", f"Hab. {room['display_number']}"),
+                     ("Huésped", guest_label if guest_id else "Sin registrar"),
+                     ("Salida", format_moment(checkout))],
+            next_step=f"Entrega la tarjeta y pruébala en la puerta de la Hab. {room['display_number']}.",
+            on_done=lambda r: refresh(),
+        )
 
     def do_confirm(e=None):
         run_busy(_do_checkin)
 
-    emit_btn = PrimaryButton("Emitir tarjeta", on_click=do_confirm, icon=ft.Icons.CREDIT_CARD)
+    emit_btn = PrimaryButton("Grabar tarjeta", on_click=do_confirm, icon=ft.Icons.CREDIT_CARD)
     run_busy = make_busy_guard(page, emit_btn)
 
     dlg = ft.AlertDialog(
         modal=True,
-        title=ft.Text(f"Check-in — Hab. {room['display_number']}", size=18,
+        title=ft.Text(f"Check-in · Hab. {room['display_number']}", size=18,
                       weight=ft.FontWeight.W_700, color=theme.TEXT),
         content=ft.Container(
             content=ft.Column(
@@ -617,15 +680,11 @@ def _open_checkin_form(page, room: dict, sf, state, refresh) -> None:
                     guest_dd,
                     ft.Container(height=4),
                     ft.Row([
-                        ft.Text("Noches:", size=13, color=theme.TEXT_MUTED),
+                        ft.Text("Noches", size=13, color=theme.TEXT_MUTED),
                         days_display,
                     ], spacing=8),
                     days_slider,
-                    ft.Row([
-                        ft.Icon(ft.Icons.SCHEDULE, size=14, color=theme.TEXT_MUTED),
-                        ft.Text("Checkout: ", size=12, color=theme.TEXT_MUTED),
-                        checkout_display,
-                    ], spacing=4),
+                    checkout_field.control,
                 ],
                 spacing=10,
                 tight=True,
@@ -672,14 +731,14 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
         show_toast(page, "No hay habitaciones disponibles (limpias y libres)", "error")
         return
 
-    guest_name = active_info["guest_name"] if active_info else "(sin huesped)"
+    guest_name = active_info["guest_name"] if active_info else "(sin huésped)"
     checkout_str = (
         active_info["expires_at"].strftime("%d/%m/%Y %H:%M")
         if active_info and active_info["expires_at"] else "—"
     )
 
     target_dd = ft.Dropdown(
-        label="Nueva habitacion",
+        label="Nueva habitación",
         options=[
             ft.dropdown.Option(str(r["id"]),
                                f"Hab. {r['display_number']} (edif {r['building']} piso {r['floor']})")
@@ -703,25 +762,33 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
             return
         _page_close(page, dlg)
         op_name = state.operator.name if state.operator else "?"
-        with sf() as s:
-            old_r = s.get(Room, room["id"])
-            new_r = s.get(Room, new_room_id)
-            if not old_r or not new_r:
-                show_toast(page, "Habitaciones no encontradas", "error")
-                return
-            result = change_guest_room(
-                encoder=enc,
-                hotel=state.hotel,
-                session=s,
-                old_room=old_r,
-                new_room=new_r,
-                operator=op_name,
-            )
-        if result.ok:
-            show_toast(page, result.message or "Tarjeta reescrita", "success")
-        else:
-            show_toast(page, result.error or "Error al cambiar habitacion", "error")
-        refresh()
+        target = next((o.text for o in target_dd.options if o.key == target_dd.value), "")
+
+        def write():
+            with sf() as s:
+                old_r = s.get(Room, room["id"])
+                new_r = s.get(Room, new_room_id)
+                if not old_r or not new_r:
+                    return CardResult(ok=False, card_type="Guest", error="Habitaciones no encontradas")
+                return change_guest_room(
+                    encoder=enc,
+                    hotel=state.hotel,
+                    session=s,
+                    old_room=old_r,
+                    new_room=new_r,
+                    operator=op_name,
+                )
+
+        run_card_write(
+            page,
+            title=f"Cambiar hab. {room['display_number']}",
+            op=write,
+            details=[("De", f"Hab. {room['display_number']}"), ("A", target)],
+            working_text="Reescribiendo tarjeta…",
+            success_text="Tarjeta reescrita",
+            next_step="Pásala por la cerradura de la nueva habitación.",
+            on_done=lambda r: refresh(),
+        )
 
     def do_confirm(e=None):
         run_busy(_do_change_room)
@@ -758,9 +825,9 @@ def _open_change_room_form(page, room: dict, active_info, sf, state, refresh) ->
                     target_dd,
                     ft.Container(height=6),
                     ft.Text(
-                        "Coloca la tarjeta del huesped en el encoder. Se reescribira "
-                        "preservando huesped y checkout. Luego pasala por la cerradura "
-                        "de la nueva habitacion.",
+                        "Coloca la tarjeta del huésped en el encoder. Se reescribirá "
+                        "conservando huésped y salida. Luego pásala por la cerradura "
+                        "de la nueva habitación.",
                         size=11,
                         color=theme.TEXT_MUTED,
                     ),

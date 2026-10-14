@@ -165,10 +165,10 @@ def auto_connect(state: AppState, hint_only: bool = False) -> tuple[bool, str]:
     if hint_only:
         ports = _hint_ports()
         if not ports:
-            return False, "No se detecto ningun encoder conectado"
+            return False, "No se detectó ningún encoder conectado"
     port = detect_encoder_port(ports=ports)
     if not port:
-        return False, "No se detecto ningun encoder conectado"
+        return False, "No se detectó ningún encoder conectado"
     return connect_port(state, port)
 
 

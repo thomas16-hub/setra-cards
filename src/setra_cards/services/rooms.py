@@ -109,13 +109,13 @@ def create_room(
 ) -> Room:
     display = display_number.strip()
     if not display:
-        raise ValueError("Numero de habitacion requerido")
+        raise ValueError("Número de habitación requerido")
     _validate_byte_field(building, "Edificio")
     _validate_byte_field(floor, "Piso")
     if state not in VALID_STATES:
         raise ValueError(f"Estado invalido: {state}")
     if get_by_display(session, display):
-        raise ValueError(f"Ya existe habitacion {display}")
+        raise ValueError(f"Ya existe habitación {display}")
     # Retry en caso de race en sequential_id (UNIQUE constraint)
     last_exc: Exception | None = None
     for _ in range(3):
@@ -137,7 +137,7 @@ def create_room(
             session.rollback()
             last_exc = exc
             continue
-    raise ValueError(f"No se pudo crear la habitacion (conflicto de ID): {last_exc}")
+    raise ValueError(f"No se pudo crear la habitación (conflicto de ID): {last_exc}")
 
 
 def update_room(
@@ -153,15 +153,15 @@ def update_room(
 ) -> Room:
     r = session.get(Room, room_id)
     if not r:
-        raise ValueError("Habitacion no existe")
+        raise ValueError("Habitación no existe")
     old_display = r.display_number  # legacy CardLog rows are keyed by it
     if display_number is not None:
         new_display = display_number.strip()
         if not new_display:
-            raise ValueError("Numero de habitacion no puede estar vacio")
+            raise ValueError("Número de habitación no puede estar vacío")
         if new_display != r.display_number:
             if get_by_display(session, new_display):
-                raise ValueError(f"Ya existe habitacion {new_display}")
+                raise ValueError(f"Ya existe habitación {new_display}")
             r.display_number = new_display
     old_triple = (r.building, r.floor, r.room_no_id)
     building_changed = False
@@ -199,7 +199,7 @@ def update_room(
         # Audit trail: the lock validates against this triple — a change means
         # previously issued cards for this room stop opening the door.
         detail = (
-            f"Habitacion {r.display_number}: (edificio, piso, room_no_id) "
+            f"Habitación {r.display_number}: (edificio, piso, room_no_id) "
             f"{old_triple} -> {new_triple}"
         )
         logger.info("Room lock-identity changed — %s", detail)

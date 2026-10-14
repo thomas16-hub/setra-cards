@@ -33,9 +33,9 @@ def build(page: ft.Page) -> ft.Control:
             _guest_table(page, items, refresh)
             if items
             else EmptyState(
-                "Sin huespedes registrados" if not query["val"] else "Sin resultados",
-                "Crea un huesped nuevo o busca por nombre, documento o telefono." if not query["val"]
-                else "Prueba con otros criterios de busqueda.",
+                "Sin huéspedes registrados" if not query["val"] else "Sin resultados",
+                "Crea un huésped nuevo o busca por nombre, documento o teléfono." if not query["val"]
+                else "Prueba con otros criterios de búsqueda.",
                 icon=ft.Icons.PEOPLE_OUTLINE,
             )
         )
@@ -45,7 +45,7 @@ def build(page: ft.Page) -> ft.Control:
         _open_guest_dialog(page, state, None, refresh)
 
     search = ft.TextField(
-        hint_text="Buscar por nombre, documento o telefono...",
+        hint_text="Buscar por nombre, documento o teléfono...",
         prefix_icon=ft.Icons.SEARCH,
         border_radius=theme.INPUT_RADIUS,
         height=44,
@@ -57,9 +57,9 @@ def build(page: ft.Page) -> ft.Control:
     )
 
     header = PageHeader(
-        title="Huespedes",
+        title="Huéspedes",
         subtitle=f"{state.hotel.name}",
-        actions=[PrimaryButton("Nuevo huesped", on_click=on_new, icon=ft.Icons.PERSON_ADD)],
+        actions=[PrimaryButton("Nuevo huésped", on_click=on_new, icon=ft.Icons.PERSON_ADD)],
     )
 
     refresh()
@@ -111,7 +111,7 @@ def _guest_table(page: ft.Page, guests: list[Guest], on_change) -> ft.Control:
         columns=[
             ft.DataColumn(ft.Text("Nombre", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED)),
             ft.DataColumn(ft.Text("Documento", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED)),
-            ft.DataColumn(ft.Text("Telefono", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED)),
+            ft.DataColumn(ft.Text("Teléfono", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED)),
             ft.DataColumn(ft.Text("Email", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED)),
             ft.DataColumn(ft.Text("Actualizado", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED)),
             ft.DataColumn(ft.Text("")),
@@ -135,7 +135,7 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
 
     name = ft.TextField(label="Nombre completo", value=guest.name if guest else "", autofocus=is_new, border_radius=theme.INPUT_RADIUS)
     doc = ft.TextField(label="Documento", value=(guest.document or "") if guest else "", border_radius=theme.INPUT_RADIUS)
-    phone = ft.TextField(label="Telefono", value=(guest.phone or "") if guest else "", border_radius=theme.INPUT_RADIUS)
+    phone = ft.TextField(label="Teléfono", value=(guest.phone or "") if guest else "", border_radius=theme.INPUT_RADIUS)
     email = ft.TextField(label="Email (opcional)", value=(guest.email or "") if guest else "", border_radius=theme.INPUT_RADIUS)
     notes = ft.TextField(label="Notas (opcional)", value=(guest.notes or "") if guest else "",
                          multiline=True, min_lines=2, max_lines=4, border_radius=theme.INPUT_RADIUS)
@@ -151,13 +151,13 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
                         s, name=name.value or "", document=doc.value, phone=phone.value, email=email.value, notes=notes.value,
                     )
                     log_action(s, "guest_create", state.operator.name if state.operator else "?", g.name)
-                    show_toast(page, f"Huesped '{g.name}' creado", "success")
+                    show_toast(page, f"Huésped '{g.name}' creado", "success")
                 else:
                     guests_service.update_guest(
                         s, guest.id, name=name.value, document=doc.value, phone=phone.value, email=email.value, notes=notes.value,
                     )
                     log_action(s, "guest_update", state.operator.name if state.operator else "?", guest.name)
-                    show_toast(page, "Huesped actualizado", "success")
+                    show_toast(page, "Huésped actualizado", "success")
             except ValueError as exc:
                 show_toast(page, str(exc), "error")
                 return
@@ -172,13 +172,13 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
             with sf() as s:
                 guests_service.delete_guest(s, guest.id)
                 log_action(s, "guest_delete", state.operator.name if state.operator else "?", guest.name)
-            show_toast(page, f"Huesped '{guest.name}' eliminado", "info")
+            show_toast(page, f"Huésped '{guest.name}' eliminado", "info")
             _page_close(page, dlg)
             on_done()
 
         confirm_dialog(
             page, f"Eliminar a {guest.name}?",
-            "Las tarjetas emitidas a este huesped quedaran registradas sin asociacion.",
+            "Las tarjetas emitidas a este huésped quedarán registradas sin asociación.",
             on_confirm=do_delete, confirm_label="Eliminar", danger=True,
         )
 
@@ -191,7 +191,7 @@ def _open_guest_dialog(page: ft.Page, state, guest: Guest | None, on_done) -> No
 
     dlg = ft.AlertDialog(
         modal=True,
-        title=ft.Text("Editar huesped" if not is_new else "Nuevo huesped",
+        title=ft.Text("Editar huésped" if not is_new else "Nuevo huésped",
                       size=18, weight=ft.FontWeight.W_600, color=theme.TEXT),
         content=ft.Container(
             content=ft.Column([name, doc, phone, email, notes], spacing=12, tight=True),

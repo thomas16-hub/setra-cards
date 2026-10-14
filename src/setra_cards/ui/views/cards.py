@@ -28,13 +28,16 @@ from setra_cards.storage.database import init_db
 from setra_cards.ui import theme
 from setra_cards.ui.components import (
     Badge,
+    DateTimeField,
     PageHeader,
     PrimaryButton,
     SecondaryButton,
     SectionCard,
     confirm_dialog,
+    format_moment,
     make_busy_guard,
     op_spinner,
+    run_card_write,
     show_toast,
 )
 from setra_cards.encoder.protocol import (
@@ -49,14 +52,14 @@ GLOBAL_CARD_TYPES = (CARD_TYPE_MASTER, CARD_TYPE_HOUSEKEEPING, CARD_TYPE_CHECKOU
 
 # (key, label, icon, descripcion, min_role). min_role=None → todos los roles
 CARD_KINDS = [
-    ("guest",    "Huesped",      ft.Icons.BADGE_OUTLINED,             "Abre una habitacion hasta el checkout",   None),
+    ("guest",    "Huésped",      ft.Icons.BADGE_OUTLINED,             "Abre una habitación hasta el checkout",   None),
     ("laundry",  "Limpieza",     ft.Icons.CLEANING_SERVICES_OUTLINED, "Abre todas las habitaciones por unas horas", None),
     ("master",   "Maestra",      ft.Icons.KEY,                        "Abre todas las habitaciones",             "manager"),
-    ("auth",     "Autorizacion", ft.Icons.VERIFIED,                   "Programar cerraduras nuevas",             "manager"),
+    ("auth",     "Autorización", ft.Icons.VERIFIED,                   "Programar cerraduras nuevas",             "manager"),
     ("clock",    "Reloj",        ft.Icons.SCHEDULE,                   "Sincroniza hora en las cerraduras",       "manager"),
-    ("setting",  "Setting",      ft.Icons.SETTINGS_INPUT_COMPONENT,   "Asigna numero a una cerradura",           "manager"),
+    ("setting",  "Setting",      ft.Icons.SETTINGS_INPUT_COMPONENT,   "Asigna número a una cerradura",           "manager"),
     ("blank",    "Borrar",       ft.Icons.DELETE_SWEEP_OUTLINED,      "Borra una tarjeta existente",             None),
-    ("read",     "Leer",         ft.Icons.SEARCH,                     "Diagnostico de una tarjeta",              None),
+    ("read",     "Leer",         ft.Icons.SEARCH,                     "Diagnóstico de una tarjeta",              None),
     ("s70",      "S70 Audit",    ft.Icons.HISTORY_EDU_OUTLINED,       "Lee eventos de apertura de una cerradura", "manager"),
 ]
 
@@ -123,7 +126,7 @@ def _encoder_status_banner(state) -> ft.Control:
     bg = theme.SURFACE_ALT
     border_color = theme.SUCCESS if ok else theme.WARNING
     title = f"Encoder conectado en {state.encoder_port}" if ok else "Encoder no conectado"
-    sub = "Coloca la tarjeta en el lector y presiona Grabar" if ok else "Ve a Administracion y presiona 'Detectar automaticamente'"
+    sub = "Coloca la tarjeta en el lector y presiona Grabar" if ok else "Ve a Administración y presiona 'Detectar automáticamente'"
     return ft.Container(
         content=ft.Row(
             [
@@ -196,6 +199,11 @@ def _find_kind(kind_key: str) -> tuple:
     return next(k for k in CARD_KINDS if k[0] == kind_key)
 
 
+def _option_text(dropdown: ft.Dropdown) -> str:
+    """Visible text of the selected option (what the operator chose)."""
+    return next((o.text for o in dropdown.options if o.key == dropdown.value), dropdown.value or "")
+
+
 # --- Form: Huesped ---
 
 def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
@@ -207,14 +215,14 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         guest_options = guests_service.list_guests(s, limit=200)
 
     room_dd = ft.Dropdown(
-        label="Habitacion",
+        label="Habitación",
         options=[ft.dropdown.Option(str(r.id), f"Hab. {r.display_number}") for r in rooms] or
                 [ft.dropdown.Option("", "Sin habitaciones — crea una primero")],
         border_radius=theme.INPUT_RADIUS,
         expand=True,
     )
     guest_dd = ft.Dropdown(
-        label="Huesped (opcional)",
+        label="Huésped (opcional)",
         options=[ft.dropdown.Option("0", "— Sin asociar —")] +
                 [ft.dropdown.Option(str(g.id), f"{g.name}" + (f" · {g.document}" if g.document else "")) for g in guest_options],
         value="0",
@@ -232,32 +240,32 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         return (datetime.now() + timedelta(days=days)).replace(
             hour=co_h, minute=co_m, second=0, microsecond=0)
 
-    default_checkout = _checkout_after(1)
+    max_nights = 14
+    nights_text = ft.Text("1 noche", size=14, color=theme.GOLD_LIGHT, weight=ft.FontWeight.W_600)
 
-    checkout_date = ft.TextField(
-        label="Fecha de salida (YYYY-MM-DD)",
-        value=default_checkout.strftime("%Y-%m-%d"),
-        border_radius=theme.INPUT_RADIUS,
-    )
-    checkout_time = ft.TextField(
-        label="Hora salida (HH:MM)",
-        value=default_checkout.strftime("%H:%M"),
-        border_radius=theme.INPUT_RADIUS,
-    )
+    def _set_nights_label(nights: int) -> None:
+        nights_text.value = f"{nights} noche{'s' if nights != 1 else ''}"
 
-    days_slider = ft.Slider(
-        min=1, max=14, value=1, divisions=13, label="{value} noche(s)",
-        active_color=theme.PRIMARY,
+    def on_checkout_picked(value: datetime) -> None:
+        nights = (value.date() - datetime.now().date()).days
+        if 1 <= nights <= max_nights:
+            days_slider.value = nights
+        _set_nights_label(max(nights, 0))
+
+    checkout_field = DateTimeField(
+        page, "Salida del huésped", _checkout_after(1), on_change=on_checkout_picked,
     )
 
     def on_days_change(e: ft.ControlEvent) -> None:
         days = int(e.control.value)
-        co = _checkout_after(days)
-        checkout_date.value = co.strftime("%Y-%m-%d")
-        checkout_time.value = co.strftime("%H:%M")
+        _set_nights_label(days)
+        checkout_field.set_value(_checkout_after(days))
         page.update()
 
-    days_slider.on_change = on_days_change
+    days_slider = ft.Slider(
+        min=1, max=max_nights, value=1, divisions=max_nights - 1, label="{value}",
+        active_color=theme.PRIMARY, on_change=on_days_change,
+    )
 
     def do_emit() -> None:
         # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
@@ -266,37 +274,44 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             show_toast(page, "Encoder no conectado", "error")
             return
         if not room_dd.value:
-            show_toast(page, "Selecciona una habitacion", "error")
+            show_toast(page, "Selecciona una habitación", "error")
             return
-        try:
-            checkout = datetime.strptime(f"{checkout_date.value} {checkout_time.value}", "%Y-%m-%d %H:%M")
-        except Exception:
-            show_toast(page, "Fecha u hora invalida (formato: YYYY-MM-DD HH:MM)", "error")
-            return
+        checkout = checkout_field.value
         if checkout <= datetime.now():
-            show_toast(page, "La fecha de salida debe ser futura", "error")
+            show_toast(page, "La salida debe ser en el futuro", "error")
             return
+        room_id = int(room_dd.value)
+        guest_id = int(guest_dd.value) if guest_dd.value and guest_dd.value != "0" else None
 
-        with sf() as s:
-            room = rooms_service.get_room(s, int(room_dd.value))
-            if not room:
-                show_toast(page, "Habitacion no encontrada", "error")
-                return
-            guest = None
-            if guest_dd.value and guest_dd.value != "0":
-                guest = guests_service.get_guest(s, int(guest_dd.value))
+        def write():
+            with sf() as s:
+                room = rooms_service.get_room(s, room_id)
+                if not room:
+                    return card_service.CardResult(
+                        ok=False, card_type="Guest", error="Habitación no encontrada")
+                guest = guests_service.get_guest(s, guest_id) if guest_id else None
+                return card_service.create_guest_card(
+                    encoder=enc,
+                    hotel=state.hotel,
+                    session=s,
+                    room=room,
+                    guest=guest,
+                    valid_from=datetime.now(),
+                    valid_until=checkout,
+                    operator=state.operator.name if state.operator else "?",
+                )
 
-            result = card_service.create_guest_card(
-                encoder=enc,
-                hotel=state.hotel,
-                session=s,
-                room=room,
-                guest=guest,
-                valid_from=datetime.now(),
-                valid_until=checkout,
-                operator=state.operator.name if state.operator else "?",
-            )
-        _show_card_result(result_host, result)
+        display = _option_text(room_dd)
+        guest_label = _option_text(guest_dd) if guest_id else "Sin asociar"
+        run_card_write(
+            page,
+            title="Tarjeta de huésped",
+            op=write,
+            details=[("Habitación", display), ("Huésped", guest_label),
+                     ("Salida", format_moment(checkout))],
+            next_step=f"Entrega la tarjeta y pruébala en la puerta de la {display}.",
+            on_done=lambda r: _show_card_result(result_host, r),
+        )
 
     def on_submit(e: ft.ControlEvent) -> None:
         run_busy(do_emit)
@@ -306,14 +321,17 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
-        title="Tarjeta de huesped",
+        title="Tarjeta de huésped",
         content=ft.Column(
             [
                 ft.Row([room_dd, guest_dd], spacing=12),
                 ft.Container(height=8),
-                ft.Text("Duracion", size=12, color=theme.TEXT_MUTED, weight=ft.FontWeight.W_600),
+                ft.Row([
+                    ft.Text("Noches", size=12, color=theme.TEXT_MUTED, weight=ft.FontWeight.W_600),
+                    nights_text,
+                ], spacing=10),
                 days_slider,
-                ft.Row([checkout_date, checkout_time], spacing=12),
+                checkout_field.control,
                 ft.Container(height=14),
                 ft.Row([submit_btn, spinner], spacing=12),
             ],
@@ -427,7 +445,7 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
 
     staff_dd = ft.Dropdown(
         label="Personal de limpieza (opcional)",
-        options=[ft.dropdown.Option("0", "— Sin asignar staff —")] +
+        options=[ft.dropdown.Option("0", "— Sin asignar —")] +
                 [ft.dropdown.Option(str(s["id"]), f"{s['name']} ({len(s['assigned'])} hab.)") for s in staff_info],
         value="0",
         border_radius=theme.INPUT_RADIUS,
@@ -457,18 +475,34 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             match = next((s for s in staff_info if s["id"] == selected_staff["id"]), None)
             if match:
                 staff_name = match["name"]
-        with sf() as s:
-            result = card_service.create_laundry_card(
-                encoder=enc,
-                hotel=state.hotel,
-                session=s,
-                hours=hours_val["v"],
-                operator=state.operator.name if state.operator else "?",
-                operator_role=state.operator.role if state.operator else None,
-                staff_name=staff_name,
-                assigned_rooms=sorted(selected_rooms) if selected_rooms else None,
-            )
-        _show_card_result(result_host, result)
+        hours = hours_val["v"]
+        assigned = sorted(selected_rooms) if selected_rooms else None
+
+        def write():
+            with sf() as s:
+                return card_service.create_laundry_card(
+                    encoder=enc,
+                    hotel=state.hotel,
+                    session=s,
+                    hours=hours,
+                    operator=state.operator.name if state.operator else "?",
+                    operator_role=state.operator.role if state.operator else None,
+                    staff_name=staff_name,
+                    assigned_rooms=assigned,
+                )
+
+        details = [("Duración", f"{hours} hora{'s' if hours != 1 else ''}"),
+                   ("Vence", format_moment(datetime.now() + timedelta(hours=hours)))]
+        if staff_name:
+            details.insert(0, ("Personal", staff_name))
+        run_card_write(
+            page,
+            title="Tarjeta de limpieza",
+            op=write,
+            details=details,
+            next_step="Abre todas las habitaciones hasta la hora de vencimiento.",
+            on_done=lambda r: _show_card_result(result_host, r),
+        )
 
     def do_emit(e: ft.ControlEvent) -> None:
         run_busy(_emit_op)
@@ -542,14 +576,8 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
 def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     state = get_state()
     sf = init_db()
-    default_exp = datetime.now() + timedelta(days=30)
-
-    exp_date = ft.TextField(label="Vence (YYYY-MM-DD)",
-                            value=default_exp.strftime("%Y-%m-%d"),
-                            border_radius=theme.INPUT_RADIUS)
-    exp_time = ft.TextField(label="Hora (HH:MM)",
-                            value="23:59",
-                            border_radius=theme.INPUT_RADIUS)
+    default_exp = (datetime.now() + timedelta(days=30)).replace(hour=23, minute=59)
+    exp_field = DateTimeField(page, "Vence", default_exp)
 
     def do_emit() -> None:
         # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
@@ -557,22 +585,28 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
-        try:
-            exp = datetime.strptime(f"{exp_date.value} {exp_time.value}", "%Y-%m-%d %H:%M")
-        except Exception:
-            show_toast(page, "Fecha u hora invalida", "error")
-            return
+        exp = exp_field.value
         if exp <= datetime.now():
-            show_toast(page, "La fecha de vencimiento debe ser futura", "error")
+            show_toast(page, "El vencimiento debe ser en el futuro", "error")
             return
-        with sf() as s:
-            result = card_service.create_master_card(
-                encoder=enc, hotel=state.hotel, session=s,
-                valid_until=exp,
-                operator=state.operator.name if state.operator else "?",
-                operator_role=state.operator.role if state.operator else None,
-            )
-        _show_card_result(result_host, result)
+
+        def write():
+            with sf() as s:
+                return card_service.create_master_card(
+                    encoder=enc, hotel=state.hotel, session=s,
+                    valid_until=exp,
+                    operator=state.operator.name if state.operator else "?",
+                    operator_role=state.operator.role if state.operator else None,
+                )
+
+        run_card_write(
+            page,
+            title="Tarjeta maestra",
+            op=write,
+            details=[("Vence", format_moment(exp))],
+            next_step="Abre todas las habitaciones. Guárdala en un lugar seguro.",
+            on_done=lambda r: _show_card_result(result_host, r),
+        )
 
     def on_submit(e: ft.ControlEvent) -> None:
         run_busy(do_emit)
@@ -585,7 +619,7 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         title="Tarjeta maestra (abre todas las habitaciones)",
         content=ft.Column(
             [
-                ft.Row([exp_date, exp_time], spacing=12),
+                exp_field.control,
                 ft.Container(height=12),
                 ft.Row([submit_btn, spinner], spacing=12),
             ],
@@ -604,7 +638,7 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         rooms = rooms_service.list_rooms(s)
 
     room_dd = ft.Dropdown(
-        label="Habitacion",
+        label="Habitación",
         options=[ft.dropdown.Option(str(r.id), f"Hab. {r.display_number}") for r in rooms],
         border_radius=theme.INPUT_RADIUS,
         expand=True,
@@ -617,19 +651,31 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             show_toast(page, "Encoder no conectado", "error")
             return
         if not room_dd.value:
-            show_toast(page, "Selecciona una habitacion", "error")
+            show_toast(page, "Selecciona una habitación", "error")
             return
-        with sf() as s:
-            room = rooms_service.get_room(s, int(room_dd.value))
-            if not room:
-                show_toast(page, "Habitacion no encontrada", "error")
-                return
-            result = card_service.create_setting_card(
-                encoder=enc, hotel=state.hotel, session=s, room=room,
-                operator=state.operator.name if state.operator else "?",
-                operator_role=state.operator.role if state.operator else None,
-            )
-        _show_card_result(result_host, result)
+        room_id = int(room_dd.value)
+
+        def write():
+            with sf() as s:
+                room = rooms_service.get_room(s, room_id)
+                if not room:
+                    return card_service.CardResult(
+                        ok=False, card_type="Setting", error="Habitación no encontrada")
+                return card_service.create_setting_card(
+                    encoder=enc, hotel=state.hotel, session=s, room=room,
+                    operator=state.operator.name if state.operator else "?",
+                    operator_role=state.operator.role if state.operator else None,
+                )
+
+        display = _option_text(room_dd)
+        run_card_write(
+            page,
+            title="Tarjeta Setting",
+            op=write,
+            details=[("Habitación", display)],
+            next_step=f"Pasa la tarjeta por la cerradura de la {display} para asignarle el número.",
+            on_done=lambda r: _show_card_result(result_host, r),
+        )
 
     def on_submit(e: ft.ControlEvent) -> None:
         run_busy(do_emit)
@@ -639,10 +685,10 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
-        title="Setting — asignar habitacion a una cerradura",
+        title="Setting — asignar habitación a una cerradura",
         content=ft.Column(
             [
-                ft.Text("Coloca la tarjeta en el encoder y selecciona la habitacion.",
+                ft.Text("Coloca la tarjeta en el encoder y selecciona la habitación.",
                         size=12, color=theme.TEXT_MUTED),
                 ft.Container(height=8),
                 room_dd,
@@ -661,9 +707,13 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
     sf = init_db()
 
     labels = {
-        "auth": ("Tarjeta de autorizacion", "Graba una tarjeta para autorizar cerraduras nuevas.", "Grabar Auth", ft.Icons.VERIFIED),
-        "clock": ("Tarjeta de reloj", "Sincroniza la fecha/hora en las cerraduras.", "Grabar Clock", ft.Icons.SCHEDULE),
+        "auth": ("Tarjeta de autorización", "Graba una tarjeta para autorizar cerraduras nuevas.", "Grabar autorización", ft.Icons.VERIFIED),
+        "clock": ("Tarjeta de reloj", "Sincroniza la fecha y la hora de las cerraduras con la de este PC.", "Grabar reloj", ft.Icons.SCHEDULE),
         "blank": ("Borrar tarjeta", "Coloca la tarjeta en el encoder: primero se lee y te muestra qué es antes de borrarla.", "Leer y borrar", ft.Icons.DELETE_SWEEP_OUTLINED),
+    }
+    next_steps = {
+        "auth": "Pasa la tarjeta por la cerradura nueva para autorizarla.",
+        "clock": "Pasa la tarjeta por cada cerradura en los próximos minutos.",
     }
     title, hint, btn_label, icon = labels[kind]
 
@@ -675,12 +725,23 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
             show_toast(page, "Encoder no conectado", "error")
             return
         op = state.operator.name if state.operator else "?"
-        with sf() as s:
-            result = card_service.blank_existing_card(
-                encoder=enc, hotel=state.hotel, session=s, operator=op,
-                expect_card_type=expect_type, expect_uid=expect_uid,
-            )
-        _show_card_result(result_host, result)
+
+        def wipe():
+            with sf() as s:
+                return card_service.blank_existing_card(
+                    encoder=enc, hotel=state.hotel, session=s, operator=op,
+                    expect_card_type=expect_type, expect_uid=expect_uid,
+                )
+
+        run_card_write(
+            page,
+            title="Borrar tarjeta",
+            op=wipe,
+            working_text="Borrando tarjeta…",
+            success_text="Tarjeta borrada",
+            next_step="La tarjeta ya no abre ninguna puerta. Se puede volver a usar.",
+            on_done=lambda r: _show_card_result(result_host, r),
+        )
 
     def read_then_confirm_blank(enc) -> None:
         """Show the operator WHAT is on the encoder, then ask before wiping."""
@@ -730,14 +791,19 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
             return
         op = state.operator.name if state.operator else "?"
         role = state.operator.role if state.operator else None
-        with sf() as s:
-            if kind == "auth":
-                result = card_service.create_auth_card(
-                    encoder=enc, hotel=state.hotel, session=s, operator=op, operator_role=role)
-            else:
-                result = card_service.create_clock_card(
-                    encoder=enc, hotel=state.hotel, session=s, operator=op, operator_role=role)
-        _show_card_result(result_host, result)
+        create = card_service.create_auth_card if kind == "auth" else card_service.create_clock_card
+
+        def write():
+            with sf() as s:
+                return create(encoder=enc, hotel=state.hotel, session=s, operator=op, operator_role=role)
+
+        run_card_write(
+            page,
+            title=title,
+            op=write,
+            next_step=next_steps[kind],
+            on_done=lambda r: _show_card_result(result_host, r),
+        )
 
     def on_submit(e: ft.ControlEvent) -> None:
         run_busy(do_emit)
@@ -798,7 +864,7 @@ def _read_problem_badges(info: dict, is_blank: bool) -> list[ft.Control]:
         badges.append(Badge("EN BLANCO", theme.INFO, theme.SURFACE_ALT))
         return badges
     if info.get("checksum_valid") is False:
-        badges.append(Badge("CHECKSUM INVALIDO — TARJETA CORRUPTA", "#FFFFFF", theme.ERROR_DARK))
+        badges.append(Badge("CHECKSUM INVÁLIDO — TARJETA CORRUPTA", "#FFFFFF", theme.ERROR_DARK))
     if info.get("uid_match") is False:
         badges.append(Badge("OTRO SISTEMA — UID/DES NO COINCIDE", "#FFFFFF", theme.ERROR_DARK))
     if info.get("expired") is True:
@@ -863,7 +929,7 @@ def _render_read_result(ok: bool, msg: str, info: dict) -> ft.Control:
         controls.append(
             ft.Row(
                 [
-                    ft.Text("Valida desde:", size=12, color=theme.TEXT_MUTED),
+                    ft.Text("Válida desde:", size=12, color=theme.TEXT_MUTED),
                     ft.Text(_fmt_card_dt(info.get("valid_from")), size=12,
                             weight=ft.FontWeight.W_600, color=theme.TEXT),
                     ft.Container(width=14),
@@ -900,7 +966,7 @@ def _render_read_result(ok: bool, msg: str, info: dict) -> ft.Control:
 def _read_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     state = get_state()
     output_host = ft.Container(
-        content=ft.Text("Sin lectura todavia.", size=12, color=theme.TEXT_LIGHT),
+        content=ft.Text("Sin lectura todavía.", size=12, color=theme.TEXT_LIGHT),
     )
 
     def do_read() -> None:
@@ -921,7 +987,7 @@ def _read_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
     run_busy = make_busy_guard(page, submit_btn, spinner)
 
     return SectionCard(
-        title="Leer tarjeta (diagnostico)",
+        title="Leer tarjeta (diagnóstico)",
         content=ft.Column(
             [
                 ft.Text("Coloca cualquier tarjeta en el encoder para ver su contenido.", size=12, color=theme.TEXT_MUTED),
@@ -984,7 +1050,7 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             ft.Text(
                 f"Edificio {info['building']} · Piso {info['floor']} · "
                 f"{len(info['events'])} eventos ({info['new_count']} nuevos) · "
-                f"Sectores leidos: {info['sectors_read']}",
+                f"Sectores leídos: {info['sectors_read']}",
                 size=11, color=theme.TEXT_MUTED,
             ),
         ]
@@ -1008,7 +1074,7 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 ]
                 detail_bits = []
                 if ev.get("guest_name"):
-                    detail_bits.append(f"Huesped: {ev['guest_name']}")
+                    detail_bits.append(f"Huésped: {ev['guest_name']}")
                 if ev.get("room_display"):
                     detail_bits.append(f"Hab. {ev['room_display']}")
                 if ev.get("operator"):
@@ -1045,8 +1111,8 @@ def _s70_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             [
                 ft.Text(
                     "Coloca una tarjeta S70 (pasada previamente por una cerradura) en el encoder. "
-                    "Se extraen los eventos de apertura y se cruzan con la emision de tarjetas "
-                    "para identificar que huesped/operador entro a cada hora.",
+                    "Se extraen los eventos de apertura y se cruzan con la emisión de tarjetas "
+                    "para identificar qué huésped u operador entró a cada hora.",
                     size=12, color=theme.TEXT_MUTED,
                 ),
                 ft.Container(height=8),
