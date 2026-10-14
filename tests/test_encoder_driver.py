@@ -70,6 +70,7 @@ def test_ok_accepts_valid_ack():
     assert EncoderDriver._ok(b"\x01\x00") is True
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_ok_rejects_inconsistent_len_byte():
     # LEN says 5 bytes follow but only 1 does — truncated/stale frame
     assert EncoderDriver._ok(b"\x05\x00") is False
@@ -80,6 +81,7 @@ def test_ok_rejects_frame_shorter_than_two_bytes():
     assert EncoderDriver._ok(b"\x00") is False
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_ok_rejects_wrong_expected_len():
     # Internally consistent 6-byte frame, but we expected a 2-byte ACK:
     # this is exactly a stale anticollision reply masquerading as an ACK.
@@ -93,6 +95,7 @@ def test_write_ok_accepts_both_documented_acks():
     assert EncoderDriver._write_ok(b"\x01\x01", expected_len=ACK_FRAME_LEN) is True
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_write_ok_rejects_error_status_and_bad_framing():
     assert EncoderDriver._write_ok(b"\x01\x02", expected_len=ACK_FRAME_LEN) is False
     assert EncoderDriver._write_ok(b"\x02\x00\x00", expected_len=ACK_FRAME_LEN) is False
@@ -106,6 +109,7 @@ def test_beep_accepts_real_ack():
     assert _driver_with(fake).beep() is True
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_beep_rejects_stale_read_frame_as_ack():
     # A late 18-byte read reply starts with 0x11 0x00: old code saw
     # resp[1] == 0x00 and reported a false ACK. Frame length must reject it.
@@ -114,6 +118,7 @@ def test_beep_rejects_stale_read_frame_as_ack():
     assert _driver_with(fake).beep() is False
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_beep_rejects_garbage_frame():
     fake = FakeSerial(responses=[b"\x00\x00"])  # LEN=0 inconsistent with 2 bytes
     assert _driver_with(fake).beep() is False
@@ -121,6 +126,7 @@ def test_beep_rejects_garbage_frame():
 
 # --- timeout: fast-fail + drain ---
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_send_timeout_fast_fails_and_drains():
     fake = FakeSerial(responses=[])  # device never answers
     drv = _driver_with(fake)
@@ -145,6 +151,7 @@ def test_write_block_accepts_ack_01():
     assert _driver_with(fake).write_block(20, bytes(16)) is True
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_write_block_rejects_stale_long_frame():
     fake = FakeSerial(responses=[b"\x11\x00" + bytes(16)])
     assert _driver_with(fake).write_block(20, bytes(16)) is False
@@ -165,6 +172,7 @@ def test_detect_card_happy_path():
     assert det.atqa == b"\x04\x00"
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_detect_card_rejects_three_byte_select():
     # The old test fixture shape; the real encoder never sends it.
     fake = FakeSerial(responses=[
@@ -192,6 +200,7 @@ def test_read_block_success_returns_16_data_bytes():
     assert _driver_with(fake).read_block(44) == payload
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_read_block_error_frame_fast_fails_without_blocking_read18():
     fake = FakeSerial(responses=[b"\x01\x14"])  # 2-byte error frame
     assert _driver_with(fake).read_block(44) is None

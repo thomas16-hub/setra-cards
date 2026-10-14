@@ -59,6 +59,11 @@ VERIFY_MISMATCH_ERROR = (
 DETECT_RETRIES = 3
 DETECT_RETRY_PAUSE_S = 0.05
 
+# Read-back checks (write verify, blank confirm) only log until they are
+# validated against the real encoder at the hotel.
+VERIFY_BLOCKING_WRITE = False
+VERIFY_BLOCKING_BLANK = False
+
 
 def _detect_uid(encoder: EncoderDriver) -> bytes | None:
     for attempt in range(DETECT_RETRIES):
@@ -67,6 +72,20 @@ def _detect_uid(encoder: EncoderDriver) -> bytes | None:
             return detection.uid
         if attempt < DETECT_RETRIES - 1:
             time.sleep(DETECT_RETRY_PAUSE_S)
+    return None
+
+
+def _reselect(encoder: EncoderDriver, original_uid: bytes | None) -> str | None:
+    """Re-select the card before the next auth, as v2.0.10 did.
+
+    A missed detection is NOT treated as "card removed": on the real encoder
+    the select right after a halt or a failed auth often gets no answer, and
+    v2.1.0 aborted every write because of it. Only a detection that returns
+    a DIFFERENT UID aborts (swapped card).
+    """
+    detection = encoder.detect_card()
+    if original_uid is not None and detection is not None and detection.uid != original_uid:
+        return CARD_SWAPPED_ERROR
     return None
 
 
@@ -80,25 +99,23 @@ class WriteResult:
 def _auth_keys_standard(sig: SystemSignature) -> list[tuple[str, bytes, int]]:
     """Key attempts for every card type except Authorization.
 
-    TrailerB-B first. The system access bits (78 77 88) only allow data-block
-    WRITES with key B: on a re-issued card Sig-A authenticates fine but the
-    write is refused, and the encoder's refusal (01 01) was being counted as
-    success, leaving the old room on the card. Blank cards fail TrailerB-B and
-    fall through to FF-A, which can write under transport access bits.
+    Same order as v2.0.10 (proven on the real encoder). Moving TrailerB-B
+    first is pending until the frame trace from the hotel shows whether the
+    encoder really answers 01 01 to a refused Sig-A write.
     """
     return [
-        ("TrailerB-B", TRAILER_KEY_B, KEY_TYPE_B),
         ("FF-A", KEY_FF, KEY_TYPE_A),
         ("Sig-A", sig.key_a, KEY_TYPE_A),
+        ("TrailerB-B", TRAILER_KEY_B, KEY_TYPE_B),
         ("FF-B", KEY_FF, KEY_TYPE_B),
     ]
 
 
 def _auth_keys_auth_card() -> list[tuple[str, bytes, int]]:
-    """Key attempts for Authorization card (only TrailerB and FF)."""
+    """Key attempts for Authorization card (only FF and TrailerB, v2.0.10 order)."""
     return [
-        ("TrailerB-B", TRAILER_KEY_B, KEY_TYPE_B),
         ("FF-A", KEY_FF, KEY_TYPE_A),
+        ("TrailerB-B", TRAILER_KEY_B, KEY_TYPE_B),
     ]
 
 
@@ -111,23 +128,16 @@ def _write_blocks_with_keys(
 ) -> tuple[bool, str]:
     """Write the 4 blocks. Per block, try each key until auth+write succeed.
 
-    If original_uid is given, every re-detect checks the UID still matches:
-    a different card aborts with CARD_SWAPPED_ERROR, no card at all aborts
-    with CARD_REMOVED_ERROR. Returns (ok, error_detail).
+    Sequence identical to v2.0.10. If original_uid is given, a re-detect that
+    returns a different card aborts with CARD_SWAPPED_ERROR; a missed
+    detection does not abort. An unplugged encoder aborts with
+    ENCODER_DISCONNECTED_ERROR. Returns (ok, error_detail).
     """
 
     def _card_problem() -> str | None:
-        if original_uid is None:
-            encoder.detect_card()  # re-select the card before the next auth
-            return None
-        uid = _detect_uid(encoder)
-        if uid is None:
-            if not getattr(encoder, "is_open", True):
-                return ENCODER_DISCONNECTED_ERROR
-            return CARD_REMOVED_ERROR
-        if uid != original_uid:
-            return CARD_SWAPPED_ERROR
-        return None
+        if not getattr(encoder, "is_open", True):
+            return ENCODER_DISCONNECTED_ERROR
+        return _reselect(encoder, original_uid)
 
     for block_num, data, name in blocks:
         problem = _card_problem()
@@ -144,10 +154,11 @@ def _write_blocks_with_keys(
                 last_err = f"auth {key_name} FAIL"
                 continue
             if encoder.write_block(block_num, data):
-                logger.debug("Write OK with %s for %s", key_name, name)
+                logger.info("Write OK with %s for %s", key_name, name)
                 written = True
                 break
             last_err = f"auth {key_name} OK pero write FAIL"
+            encoder.detect_card()
         if not written:
             return False, f"{name}: {last_err}"
     return True, ""
@@ -302,13 +313,21 @@ def write_card(
             )
         logger.info("Auto-blank + rewrite succeeded after initial failure")
 
-    # Read-back verification: never report success on a card that did not
-    # actually take the data (or kept a stale tail on master/laundry).
-    verify_error = _verify_after_write(encoder, sector, sig, des_key, card, uid)
-    if verify_error:
-        return WriteResult(success=False, uid=uid, error=verify_error)
+    # Read-back verification runs in SHADOW mode: result is only logged.
+    # It was never validated on the real encoder; it becomes blocking once
+    # the hotel trace shows it passes on cards that do open the lock.
+    if VERIFY_BLOCKING_WRITE:
+        verify_error = _verify_after_write(encoder, sector, sig, des_key, card, uid)
+        if verify_error:
+            return WriteResult(success=False, uid=uid, error=verify_error)
+    else:
+        try:
+            shadow = _verify_after_write(encoder, sector, sig, des_key, card, uid)
+            logger.info("Shadow verify UID=%s: %s", uid.hex(":"), shadow or "OK")
+        except Exception:
+            logger.exception("Shadow verify raised")
 
-    logger.info("Card programmed and verified OK: UID=%s", uid.hex(":"))
+    logger.info("Card programmed OK: UID=%s", uid.hex(":"))
     encoder.halt()
     encoder.beep()
     time.sleep(0.12)
@@ -325,13 +344,15 @@ class _CardChanged(Exception):
 
 
 def _check_same_card(encoder: EncoderDriver, uid: bytes) -> None:
-    seen = _detect_uid(encoder)
-    if seen is None:
-        raise _CardChanged(
-            CARD_REMOVED_ERROR if getattr(encoder, "is_open", True) else ENCODER_DISCONNECTED_ERROR
-        )
-    if seen != uid:
-        raise _CardChanged(CARD_SWAPPED_ERROR)
+    """Re-select before auth; abort only on a different UID or unplugged encoder.
+
+    A missed detection is tolerated, like v2.0.10 (see _reselect).
+    """
+    if not getattr(encoder, "is_open", True):
+        raise _CardChanged(ENCODER_DISCONNECTED_ERROR)
+    problem = _reselect(encoder, uid)
+    if problem:
+        raise _CardChanged(problem)
 
 
 def _auth_with_any_key(
@@ -430,7 +451,10 @@ def _blank_sector(encoder: EncoderDriver, sector: int, uid: bytes) -> WriteResul
 
     # Confirm the erase: a refused write still answers with an "ok-looking"
     # status, and checkout trusts this result to free the room.
-    if not _sector_reads_blank(encoder, sector):
+    blank_ok = _sector_reads_blank(encoder, sector)
+    if not VERIFY_BLOCKING_BLANK:
+        logger.info("Shadow blank confirm UID=%s: %s", uid.hex(":"), "OK" if blank_ok else "NOT BLANK")
+    elif not blank_ok:
         return WriteResult(
             success=False, uid=uid,
             error="La tarjeta no quedó borrada (sigue con datos). Repita el borrado",

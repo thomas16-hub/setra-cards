@@ -158,6 +158,7 @@ def test_blank_card_is_written_and_verified():
     assert card.block45() == new.block45
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_reissued_card_really_gets_the_new_room():
     uid = b"\x11\x22\x33\x44"
     card = _issued_card(uid, _guest(5))
@@ -167,6 +168,7 @@ def test_reissued_card_really_gets_the_new_room():
     assert card.block45() == new.block45
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_refused_write_is_never_reported_as_success():
     # Key B on the card is not ours: only Sig-A authenticates, every write is
     # refused with 01 01 and the card keeps room 5.
@@ -179,6 +181,7 @@ def test_refused_write_is_never_reported_as_success():
     assert card.block45() == old.block45
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_card_removed_mid_write_reports_removal_and_erases_nothing():
     first = SimCard(b"\xa1\xa1\xa1\xa1")
     bystander_data = _guest(9)
@@ -229,6 +232,7 @@ def test_blank_stops_when_card_is_swapped_midway():
     assert card_b.block45() == data_b.block45
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_refused_trailer_write_is_not_reported_as_success():
     # Data blocks take the write but the trailer keeps KeyA FF: the data reads
     # back fine, yet the lock (system KeyA) could never open the card.
@@ -238,6 +242,7 @@ def test_refused_trailer_write_is_not_reported_as_success():
     assert result.success is False
 
 
+@pytest.mark.xfail(strict=True, reason="v2.1.1: strict encoder behaviour reverted to v2.0.10 pending real-encoder trace (v2.1.0 hotel regression 2026-10-14)")
 def test_refused_blank_is_not_reported_as_success():
     data = _guest(5)
     card = _issued_card(b"\xaa\xbb\xcc\xdd", data)
@@ -283,3 +288,33 @@ def test_blank_then_rewrite_on_issued_card():
     assert result.success, result.error
     assert card.block45() == bytes(16)
     assert card.blocks[SECTOR * 4 + 3] == DEFAULT_TRAILER
+
+
+class SlowEncoderSerial(SimSerial):
+    """Real-encoder timing behind the v2.1.0 hotel regression (2026-10-14).
+
+    Replies arrive later than the 80 ms poll window, so in_waiting is still 0
+    when polling ends. v2.0.10 then blocked on read() until the port timeout
+    and got the reply; v2.1.0 gave up with an empty reply, so every detection
+    failed and each write was aborted as "card removed".
+    """
+
+    @property
+    def in_waiting(self) -> int:
+        return 0
+
+
+def test_slow_encoder_replies_do_not_abort_the_write():
+    card = SimCard(b"\xaa\xbb\xcc\xdd")
+    new = _guest(5)
+    result = writer.write_card(_driver(SlowEncoderSerial(card)), SECTOR, SIG, new)
+    assert result.success, result.error
+    assert card.block45() == new.block45
+
+
+def test_slow_encoder_replies_do_not_abort_the_blank():
+    uid = b"\x11\x22\x33\x44"
+    card = _issued_card(uid, _guest(5))
+    result = writer.blank_card(_driver(SlowEncoderSerial(card)), SECTOR, expected_uid=uid)
+    assert result.success, result.error
+    assert card.block45() == bytes(16)

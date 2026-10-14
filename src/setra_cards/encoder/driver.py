@@ -32,6 +32,10 @@ ANTICOLLISION_FRAME_LEN = 6  # <05> <status> <uid:4>
 SELECT_FRAME_LEN = 4
 READ_FRAME_LEN = 18          # <11> <status> <data:16>
 
+# Log every TX/RX frame with its latency. On while the real-encoder behaviour
+# of the v2.1 write path is being validated at the hotel (2026-10-14).
+TRACE_FRAMES = True
+
 
 class EncoderError(Exception):
     """Raised when encoder communication fails."""
@@ -163,6 +167,7 @@ class EncoderDriver:
         """
         if not self._ser or not self._ser.is_open:
             raise EncoderError("Serial port not open")
+        started = time.monotonic()
         try:
             self._ser.reset_input_buffer()
             self._ser.write(data)
@@ -170,27 +175,28 @@ class EncoderDriver:
             if read_size:
                 # Blocking read: waits until exactly read_size bytes arrive (or timeout)
                 resp = self._ser.read(read_size)
-                if len(resp) < read_size:
-                    # Short read (timeout): drain once so a late frame is not
-                    # misread as the reply to the next command.
-                    self._drain_input()
-                return resp
-            # Poll for response: check every 10ms, up to max wait
-            deadline = time.monotonic() + wait
-            while time.monotonic() < deadline:
-                if self._ser.in_waiting > 0:
-                    # Settle long enough for multi-byte frames at 9600 baud:
-                    # 18 bytes = 18.75ms, so 30ms guarantees full frame arrives.
-                    time.sleep(0.030)
-                    break
-                time.sleep(0.01)
-            available = self._ser.in_waiting
-            if not available:
-                # Timeout: fast-fail instead of a blocking read(256), and drain
-                # once so a late frame cannot ACK the next command.
-                self._drain_input()
-                return b""
-            return self._ser.read(available)
+            else:
+                # Poll for response: check every 10ms, up to max wait
+                deadline = time.monotonic() + wait
+                while time.monotonic() < deadline:
+                    if self._ser.in_waiting > 0:
+                        # Settle long enough for multi-byte frames at 9600 baud:
+                        # 18 bytes = 18.75ms, so 30ms guarantees full frame arrives.
+                        time.sleep(0.030)
+                        break
+                    time.sleep(0.01)
+                # Same as v2.0.10 (proven on the real encoder): when nothing has
+                # arrived yet, block until the port timeout. Slow replies (auth,
+                # select after halt) take longer than `wait`; failing fast at
+                # 80 ms made v2.1.0 abort every write as "card removed".
+                resp = self._ser.read(self._ser.in_waiting or 256)
+            if TRACE_FRAMES:
+                logger.info(
+                    "TRACE TX: %s RX: %s (%d ms)",
+                    data.hex(" "), resp.hex(" ") if resp else "(none)",
+                    int((time.monotonic() - started) * 1000),
+                )
+            return resp
         except (serial.SerialException, OSError) as e:
             # USB unplugged mid-operation: close the port so is_connected returns False
             logger.warning("Serial port lost during operation: %s — closing port", e)
@@ -210,29 +216,16 @@ class EncoderDriver:
         return resp
 
     @staticmethod
-    def _frame_valid(resp: bytes, expected_len: int | None = None) -> bool:
-        """Validate RX framing: <LEN><STATUS>[DATA], LEN == bytes after it.
-
-        A stale/late frame (e.g. a leftover 18-byte read reply) would fail this
-        check instead of being misread as the ACK for the current command.
-        expected_len: total frame length when the reply size is known.
-        """
-        if len(resp) < 2:
-            return False
-        if resp[0] != len(resp) - 1:
-            return False
-        if expected_len is not None and len(resp) != expected_len:
-            return False
-        return True
-
-    @staticmethod
     def _ok(resp: bytes, expected_len: int | None = None) -> bool:
-        return EncoderDriver._frame_valid(resp, expected_len) and resp[1] == 0x00
+        # Lenient check, identical to v2.0.10 (the strict length/framing check
+        # was never validated on the real encoder). expected_len is kept for
+        # call-site documentation only.
+        return len(resp) >= 2 and resp[1] == 0x00
 
     @staticmethod
     def _write_ok(resp: bytes, expected_len: int | None = None) -> bool:
-        """Write can return 01 00 or 01 01, both success (documented acks)."""
-        return EncoderDriver._frame_valid(resp, expected_len) and resp[1] in (0x00, 0x01)
+        """Write can return 01 00 or 01 01, both treated as success (v2.0.10)."""
+        return len(resp) >= 2 and resp[1] in (0x00, 0x01)
 
     # --- Public API (thread-safe) ---
 
@@ -282,12 +275,13 @@ class EncoderDriver:
                 atqa = r[2:4]
 
                 r = self._send(CMD_ANTICOLLISION)
-                if not self._ok(r, expected_len=ANTICOLLISION_FRAME_LEN):
+                if not self._ok(r) or len(r) < ANTICOLLISION_FRAME_LEN:
                     return None
                 uid = r[2:6]
 
                 r = self._send(CMD_SELECT)
-                if not self._ok(r, expected_len=SELECT_FRAME_LEN):
+                # v2.0.10 rule (>= 3 bytes); the real encoder sends 4.
+                if not self._ok(r) or len(r) < 3:
                     return None
                 sak = r[2]
 
@@ -337,24 +331,11 @@ class EncoderDriver:
     def read_block(self, block: int) -> bytes | None:
         try:
             with self._lock:
-                # Staged read: an error reply is only 2 bytes (<LEN><STATUS>),
-                # so a blocking read(18) would stall a full serial timeout on
-                # every failed read. Read LEN+STATUS first, then the remaining
-                # 16 data bytes only on success (STATUS == 0x00 and LEN == 0x11).
-                head = self._send(bytes([0x02, 0x08, block]), read_size=2)
-                if len(head) < 2:
-                    return None
-                if head[1] != 0x00 or head[0] != READ_FRAME_LEN - 1:
-                    # Error status or malformed length — discard trailing bytes.
-                    logger.debug("read_block(%d) error frame: %s", block, head.hex(" "))
-                    self._drain_input()
-                    return None
-                body = self._ser.read(READ_FRAME_LEN - 2) if self._ser else b""
-                frame = head + body
-                if self._ok(frame, expected_len=READ_FRAME_LEN) and len(frame) >= READ_FRAME_LEN:
-                    return frame[2:READ_FRAME_LEN]
-                logger.debug("read_block(%d) short/invalid frame: %s", block, frame.hex(" "))
-                self._drain_input()
+                # read_size=18: blocking read ensures the full 18-byte frame
+                # arrives (v2.0.10 behaviour, proven on the real encoder).
+                r = self._send(bytes([0x02, 0x08, block]), read_size=READ_FRAME_LEN)
+                if self._ok(r) and len(r) >= READ_FRAME_LEN:
+                    return r[2:READ_FRAME_LEN]
                 return None
         except (serial.SerialException, OSError, EncoderError) as e:
             logger.warning("Serial error in read_block: %s", e)

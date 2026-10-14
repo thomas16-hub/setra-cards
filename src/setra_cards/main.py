@@ -138,6 +138,12 @@ def main() -> None:
         import ctypes
         try:
             ctypes.windll.kernel32.AllocConsole()
+            # Windowed build: stdio is None, so print() went nowhere and input()
+            # crashed after the PIN was already reset. Bind them to the new console.
+            if sys.stdout is None:
+                sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+            if sys.stdin is None:
+                sys.stdin = open("CONIN$", encoding="utf-8")
         except Exception:
             pass
         try:
