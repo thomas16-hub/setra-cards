@@ -141,7 +141,7 @@ def _driver(sim: SimSerial) -> EncoderDriver:
 
 
 def _guest(room_no_id: int):
-    return build_guest_card(now=NOW, checkout=NOW + timedelta(days=2), sig=SIG,
+    return build_guest_card(room=room_no_id, now=NOW, checkout=NOW + timedelta(days=2), sig=SIG,
                             building=1, floor=1, room_no_id=room_no_id)
 
 

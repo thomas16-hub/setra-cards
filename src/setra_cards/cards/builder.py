@@ -48,10 +48,10 @@ def make_date_bytes(dt: datetime) -> bytes:
     return bytes([dt.year - 2000, dt.month, dt.day, dt.hour, dt.minute])
 
 
-# Block45 byte[1] on Guest cards: the vendor's card_status for Guest
-# (SETCARD.INI [0] card_status=33). All 65 guest cards in IssueLog.mdb carry
-# 0x21; Setra CARDS used to write the room's sequential id here.
-GUEST_STATUS = 0x21
+# Block45 byte[1] on Guest and Setting cards = the room's sequential id, as
+# v2.0.10 wrote it. The vendor writes 0x21 (guest) / building (setting), but
+# the hotel locks were set up with v2.0.10 cards: v2.1.1 used the vendor
+# values and guest cards stopped opening (Torre Primavera, 2026-10-14).
 
 
 def _finalize_block46(block45: bytes, block46_prefix: bytes) -> bytes:
@@ -109,6 +109,7 @@ def build_clock_card(now: datetime, sig: SystemSignature) -> CardData:
 
 
 def build_setting_card(
+    room: int,
     now: datetime,
     sig: SystemSignature,
     building: int = 1,
@@ -119,13 +120,12 @@ def build_setting_card(
 
     - Assigns room to lock (byte[14] = room_no_id, la cerradura valida por esto)
     - Valid ~2 hours from issue
-    - Block 45 (16 bytes): [80, building, date(5), expire(5), building, floor, room_no_id, 00]
-      byte[1] = building, as on every vendor setting card in IssueLog.mdb.
+    - Block 45 (16 bytes): [80, room, date(5), expire(5), building, floor, room_no_id, 00]
     - Block 46: [00*13, 95 B8, checksum]
     """
     expire = now + timedelta(hours=2)
     block45 = (
-        bytes([CARD_TYPE_SETTING, building])
+        bytes([CARD_TYPE_SETTING, room])
         + make_date_bytes(now)
         + make_date_bytes(expire)
         + bytes([building, floor, room_no_id, 0x00])
@@ -143,6 +143,7 @@ def build_setting_card(
 
 
 def build_guest_card(
+    room: int,
     now: datetime,
     checkout: datetime,
     sig: SystemSignature,
@@ -154,11 +155,11 @@ def build_guest_card(
 
     - Opens the assigned room (byte[14] = room_no_id, la cerradura valida por esto)
     - Valid from now until checkout
-    - Block 45 (16 bytes): [00, 21, issue(5), checkout(5), building, floor, room_no_id, 00]
+    - Block 45 (16 bytes): [00, room, issue(5), checkout(5), building, floor, room_no_id, 00]
     - Block 46: [00*13, 95 B8, checksum]
     """
     block45 = (
-        bytes([CARD_TYPE_GUEST, GUEST_STATUS])
+        bytes([CARD_TYPE_GUEST, room])
         + make_date_bytes(now)
         + make_date_bytes(checkout)
         + bytes([building, floor, room_no_id, 0x00])

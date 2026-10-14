@@ -200,6 +200,7 @@ def create_guest_card(
 
     try:
         card_data = build_guest_card(
+            room=int(room.sequential_id),
             now=valid_from,
             checkout=valid_until,
             sig=hotel.signature,
@@ -330,6 +331,7 @@ def change_guest_room(
         # 3) Reescribir la tarjeta con los datos de new_room
         try:
             card_data = build_guest_card(
+                room=int(new_room.sequential_id),
                 now=now,
                 checkout=valid_until,
                 sig=hotel.signature,
@@ -517,6 +519,7 @@ def create_setting_card(
     now = datetime.now()
     try:
         card_data = build_setting_card(
+            room=int(room.sequential_id),
             building=room.building,
             floor=room.floor,
             room_no_id=room.room_no_id,

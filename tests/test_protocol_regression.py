@@ -201,7 +201,7 @@ def test_global_tail_constant_matches_protocol():
 def test_guest_card_tail_carries_room_identity():
     """The lock validates byte[14]=room_no_id on guest cards — keep it wired."""
     card = build_guest_card(
-        now=NOW, checkout=EXPIRE, sig=DEFAULT_SIGNATURE,
+        room=1, now=NOW, checkout=EXPIRE, sig=DEFAULT_SIGNATURE,
         building=1, floor=3, room_no_id=12,
     )
     assert card.block45[12] == 1

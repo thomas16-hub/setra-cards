@@ -68,9 +68,25 @@ def test_guest_card_matches_vendor_card_byte_for_byte():
 
     # IssueLog id 684: room 8101 (building 8, floor 1, room_no_id 1)
     real = bytes.fromhex("00210804020A1D0804030E000801010000000000000000000000000000D64DAA")
-    card = build_guest_card(now=datetime(2008, 4, 2, 10, 29), checkout=datetime(2008, 4, 3, 14, 0),
+    # byte[1] is the room argument: the vendor puts 0x21 there, the hotel
+    # locks expect the room's sequential id (v2.0.10 compatibility).
+    card = build_guest_card(room=0x21, now=datetime(2008, 4, 2, 10, 29),
+                            checkout=datetime(2008, 4, 3, 14, 0),
                             sig=_vendor_sig(), building=8, floor=1, room_no_id=1)
     assert card.block45 + card.block46 == real
+
+
+def test_guest_and_setting_byte1_is_room_sequential_id_like_v2_0_10():
+    from setra_cards.cards.builder import build_guest_card, build_setting_card
+    from setra_cards.cards.crypto import DEFAULT_SIGNATURE
+
+    now = datetime(2026, 10, 14, 15, 0)
+    guest = build_guest_card(room=17, now=now, checkout=datetime(2026, 10, 15, 12, 0),
+                             sig=DEFAULT_SIGNATURE, building=1, floor=2, room_no_id=5)
+    setting = build_setting_card(room=17, now=now, sig=DEFAULT_SIGNATURE,
+                                 building=1, floor=2, room_no_id=5)
+    assert guest.block45[1] == 17
+    assert setting.block45[1] == 17
 
 
 def test_clock_card_matches_vendor_card_byte_for_byte():
@@ -88,7 +104,7 @@ def test_setting_card_matches_vendor_layout():
     # IssueLog id 678: room 8101. The vendor writes expiry == issue time; the
     # app keeps a 2 h window (the lock ignores it), so dates 7-11 differ.
     real_b45 = bytes.fromhex("80080804020A190804020A1908010100")
-    card = build_setting_card(now=datetime(2008, 4, 2, 10, 25), sig=_vendor_sig(),
+    card = build_setting_card(room=8, now=datetime(2008, 4, 2, 10, 25), sig=_vendor_sig(),
                               building=8, floor=1, room_no_id=1)
     assert card.block45[:7] == real_b45[:7]
     assert card.block45[12:] == real_b45[12:]
