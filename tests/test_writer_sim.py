@@ -318,3 +318,40 @@ def test_slow_encoder_replies_do_not_abort_the_blank():
     result = writer.blank_card(_driver(SlowEncoderSerial(card)), SECTOR, expected_uid=uid)
     assert result.success, result.error
     assert card.block45() == bytes(16)
+
+
+class DropAfterHaltSerial(SimSerial):
+    """Real encoder (hotel trace 2026-10-14): the first command after a Halt
+    gets no reply at all, whatever it is."""
+
+    def __init__(self, card):
+        super().__init__(card)
+        self._drop_next = False
+
+    def write(self, data: bytes) -> int:
+        if self._drop_next:
+            self._drop_next = False
+            self.n += 1
+            return len(data)
+        result = super().write(data)
+        if data[1] == 0x0B:
+            self._drop_next = True
+        return result
+
+
+def test_read_back_survives_the_command_dropped_after_halt():
+    card = SimCard(b"\xaa\xbb\xcc\xdd")
+    new = _guest(5)
+    driver = _driver(DropAfterHaltSerial(card))
+    assert writer.write_card(driver, SECTOR, SIG, new).success
+    assert card.block45() == new.block45
+    error = writer._verify_after_write(driver, SECTOR, SIG, writer.DES_KEY, new, b"\xaa\xbb\xcc\xdd")
+    assert error is None
+
+
+def test_blank_confirm_survives_the_command_dropped_after_halt():
+    uid = b"\x11\x22\x33\x44"
+    card = _issued_card(uid, _guest(5))
+    driver = _driver(DropAfterHaltSerial(card))
+    assert writer.blank_card(driver, SECTOR, expected_uid=uid).success
+    assert writer._sector_reads_blank(driver, SECTOR)

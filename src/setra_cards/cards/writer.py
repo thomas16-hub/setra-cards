@@ -198,10 +198,22 @@ def _verify_decoded(
     return None
 
 
+def _halt_and_rewake(encoder: EncoderDriver) -> None:
+    """Halt the card, then absorb the command the encoder drops right after.
+
+    Hotel trace (2026-10-14): the first command sent after a Halt (01 0B)
+    always gets no reply, whatever it is (beep, request, load key). Read-back
+    checks that halted and then loaded a key or selected the card in one go
+    always failed. A throwaway detection (with retries) re-activates it.
+    """
+    encoder.halt()
+    _detect_uid(encoder)
+
+
 def _trailer_key_a_works(encoder: EncoderDriver, sector: int, key_a: bytes) -> bool:
     """True if the sector authenticates with the KeyA just written."""
     for _attempt in (1, 2):
-        encoder.halt()
+        _halt_and_rewake(encoder)
         encoder.load_key(KEY_TYPE_A, sector, key_a)
         encoder.detect_card()
         if encoder.auth_sector(sector, KEY_TYPE_A):
@@ -224,7 +236,7 @@ def _verify_after_write(
     decoded = None
     # One retry: a single dropped read must not fail a card that took the data.
     for _attempt in (1, 2):
-        encoder.halt()
+        _halt_and_rewake(encoder)
         try:
             decoded = read_card(encoder, sector, sig, des_key=des_key)
         except Exception:
@@ -470,7 +482,7 @@ def _blank_sector(encoder: EncoderDriver, sector: int, uid: bytes) -> WriteResul
 def _sector_reads_blank(encoder: EncoderDriver, sector: int) -> bool:
     """True if the restored transport trailer (KeyA FF) opens zeroed data."""
     for _attempt in (1, 2):
-        encoder.halt()
+        _halt_and_rewake(encoder)
         encoder.load_key(KEY_TYPE_A, sector, KEY_FF)
         encoder.detect_card()
         if not encoder.auth_sector(sector, KEY_TYPE_A):
