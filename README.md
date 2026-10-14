@@ -44,18 +44,32 @@ crea acceso directo, registra arranque automatico, y deja el
 
 ## Actualizaciones OTA
 
-El canal de actualizaciones es un **manifest firmado** alojado en
-`https://portonsabaneta.com/setra-cards-flet/latest.json` (el viejo canal de
-GitHub Releases dejo de funcionar al volverse privado el repo). Cada release se
-**firma OFFLINE con una llave Ed25519** cuyo secreto nunca toca ningun PC: la
-app solo lleva embebida la llave **publica** de 32 bytes.
+> **Regla: toda version se publica SIEMPRE en el canal firmado** (y ademas en
+> GitHub Releases). Nunca solo en GitHub: la v2.1.0 consulta unicamente el canal
+> firmado y, sin el, queda sin poder actualizarse ("Canal de actualizacion no
+> disponible", 2026-10-14). Se publica con un solo comando:
+> `python build_exe/publish_release.py X.Y.Z --notes "..."` (ver abajo).
+
+Canales, en el orden en que los consulta la app:
+
+| Canal | URL | Lo leen |
+|---|---|---|
+| Manifest firmado (principal) | `https://portonsabaneta.com/setra-cards-flet/latest.json` | v2.1.0 (unico canal) y v2.1.2+ |
+| GitHub Releases (respaldo) | `api.github.com/repos/thomas16-hub/setra-cards/releases/latest` | v2.0.x y v2.1.2+ si el manifest no responde |
+
+GitHub solo es alcanzable por la app mientras el repo esta **publico**: se abre
+durante la ventana de actualizacion y se vuelve a cerrar.
+
+Cada release del canal principal se **firma con una llave Ed25519** cuyo secreto
+vive solo en `~/.claude/credentials/` (nunca en el repo ni en un PC del hotel):
+la app lleva embebida solo la llave **publica** de 32 bytes.
 
 El manifest tiene la forma:
 
 ```json
 {
-  "version": "2.1.0",
-  "url": "https://portonsabaneta.com/setra-cards-flet/setra-cards-v2.1.0.zip",
+  "version": "2.1.2",
+  "url": "https://portonsabaneta.com/setra-cards-flet/setra-cards-v2.1.2-update.zip",
   "sha256": "<64 hex>",
   "signature": "<128 hex Ed25519>",
   "notes": "..."
@@ -67,7 +81,8 @@ La firma cubre el mensaje canonico `f"{version}|{url}|{sha256}"`.
 La instalacion es **manual**: boton "Buscar actualizacion" en Administracion. Al
 arrancar, la app hace ademas un chequeo best-effort en segundo plano que solo
 deja constancia en el log si hay version nueva — nunca descarga ni instala sola.
-El flujo, en orden:
+El flujo del canal firmado, en orden (si `latest.json` no responde, v2.1.2+
+pasa a GitHub Releases):
 1. Descarga `latest.json` por HTTPS (URL fija codificada en la app)
 2. **Verifica la firma Ed25519** con la llave publica embebida ANTES de confiar
    en cualquier campo; si falla, se rechaza con "Firma del manifest invalida"
@@ -78,18 +93,39 @@ El flujo, en orden:
 6. Reemplaza archivos (preservando `hoteles/`, `hotel.json`, datos y configs
    por-PC) y reinicia
 
-### Publicar una actualizacion (procedimiento manual)
+Las releases de GitHub no llevan firma: su integridad depende de HTTPS y del
+`sha256: <hash>` obligatorio en el cuerpo del release (reglas de la v2.0.10).
 
-1. Construir el `.zip` del release (ver seccion Distribucion / `release.yml`).
-2. Calcular el SHA-256 del ZIP:
-   `(Get-FileHash setra-cards-vX.Y.Z.zip -Algorithm SHA256).Hash.ToLower()`
-3. **Firmar OFFLINE** el mensaje canonico `f"{version}|{url}|{sha256}"` con la
-   llave privada Ed25519 (guardada en `~/.claude/credentials/`, NUNCA en el
-   repo ni en ningun PC del hotel). El script de publicacion en `build_exe/`
-   imprime el mensaje canonico exacto a firmar.
-4. Construir `latest.json` con `{version, url, sha256, signature, notes}`.
-5. **Subir por FTP** el ZIP y `latest.json` a `/setra-cards-flet/` en
-   portonsabaneta.com (mismo metodo FTP directo que las landings).
+### Publicar una actualizacion
+
+1. Subir `__version__` en `src/setra_cards/__init__.py` a la version nueva.
+2. Si el cambio toca `encoder/` o `cards/writer.py`, **probarlo antes en el
+   encoder real del hotel** (el simulador no reemplaza el aparato: la v2.1.0
+   paso 275 tests y fallo en todas las grabaciones reales).
+3. Ensayo sin publicar nada:
+   `python build_exe/publish_release.py X.Y.Z --notes "..." --dry-run`
+4. Publicar:
+   `python build_exe/publish_release.py X.Y.Z --notes "Que cambia, en español"`
+
+   El script corre los tests, compila, arma `setra-cards-vX.Y.Z-update.zip`
+   (carpeta `Setra-CARDS/` + `Desinstalar.bat` + `Reset_PIN_Admin.bat`), firma,
+   sube por FTP el ZIP y despues `latest.json`, relee el manifest en vivo con
+   el mismo chequeo de la app y crea el release de GitHub marcado como latest.
+5. Abrir el repo (`gh repo edit thomas16-hub/setra-cards --visibility public
+   --accept-visibility-change-consequences`), actualizar los PCs desde
+   Administracion → "Buscar actualizacion" y volver a cerrarlo
+   (`--visibility private`).
+
+### Si una version sale mal
+
+- **En el PC:** la actualizacion deja la version anterior en
+  `%LOCALAPPDATA%\SetraCARDS.prev`. Volver a ella: cerrar la app y renombrar
+  `SetraCARDS` → `SetraCARDS.malo` y `SetraCARDS.prev` → `SetraCARDS`. Los datos
+  (`%LOCALAPPDATA%\SETRA\SetraCARDS\`) no se tocan.
+- **En los canales:** la app solo ofrece versiones MAYORES a la instalada, asi
+  que no se "despublica": se publica una version nueva con el arreglo. En
+  GitHub, marcar la version mala como prerelease
+  (`gh release edit vX.Y.Z --prerelease`) para que deje de ser la latest.
 
 ## Arquitectura
 
