@@ -75,6 +75,26 @@ def test_seed_admin_created_on_empty_db(session):
     assert verify_pin(op, "1234") is False
 
 
+def test_fresh_seed_pin_is_handed_to_the_login_screen_once(session):
+    from setra_cards.services.auth import pop_seed_pin
+
+    pop_seed_pin()  # clear anything left by other tests
+    op = ensure_seed_admin(session)
+    pin = pop_seed_pin()
+    assert pin is not None
+    assert verify_pin(op, pin) is True
+    assert pop_seed_pin() is None  # shown once only
+
+
+def test_no_seed_pin_when_a_super_manager_already_exists(session):
+    from setra_cards.services.auth import pop_seed_pin
+
+    ensure_seed_admin(session)
+    pop_seed_pin()
+    ensure_seed_admin(session)  # second launch: admin exists, nothing generated
+    assert pop_seed_pin() is None
+
+
 def test_seed_admin_returns_existing_active_super(session):
     h, salt = hash_new_pin("5678")
     boss = Operator(name="Tomas", pin_hash=h, pin_salt=salt, role="super_manager",

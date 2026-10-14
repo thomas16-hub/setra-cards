@@ -13,9 +13,10 @@ from setra_cards.services.auth import role_has_access
 from setra_cards.services.card_service import (
     blank_existing_card,
     create_guest_card,
+    invalidate_active_guest_cards,
 )
 from setra_cards.storage.database import init_db
-from setra_cards.storage.models import ActionLog, CardLog, Guest, Room
+from setra_cards.storage.models import CardLog, Guest, Room
 from setra_cards.ui import theme
 from setra_cards.ui.components.basics import (
     Badge,
@@ -36,20 +37,37 @@ STATE_LABELS = {
 }
 
 
-def _blank_guest_card_for_checkout(*, encoder, hotel, session, operator):
-    """Physical checkout must only blank GUEST cards.
+def _blank_guest_card_for_checkout(*, encoder, hotel, session, operator, room=None):
+    """Physical checkout must only blank THIS room's GUEST card.
 
-    A global Master/Laundry card accidentally left on the encoder during a
-    checkout would be wiped silently — expect_card_type makes the service
-    refuse anything that is not a guest card (no force path from checkout).
+    expect_card_type refuses a Master/Laundry card left on the encoder;
+    expect_room refuses another room's guest card (which would otherwise be
+    wiped while this room is marked as checked out). No force path.
     """
+    expect_room = (room["building"], room["floor"], room["room_no_id"]) if room else None
     return blank_existing_card(
         encoder=encoder,
         hotel=hotel,
         session=session,
         operator=operator,
         expect_card_type=CARD_TYPE_GUEST,
+        expect_room=expect_room,
     )
+
+
+def _finish_checkout(session, room: dict, operator: str, action: str) -> None:
+    """Expire the room's guest cards, mark it dirty and audit, in one commit.
+
+    Keyed by room id (a renamed room is still checked out); the audit row
+    goes through action_log.log so it joins the tamper-evident hash chain,
+    and that call commits the whole checkout.
+    """
+    invalidate_active_guest_cards(session, room["id"], legacy_display=room["display_number"])
+    r = session.get(Room, room["id"])
+    if r is None:
+        raise ValueError("Habitacion no existe")
+    r.state = "sucia"
+    log_action(session, action, operator, f"Hab. {room['display_number']}")
 
 
 def build(page: ft.Page) -> ft.Control:
@@ -79,11 +97,14 @@ def build(page: ft.Page) -> ft.Control:
                 guests = s.query(Guest).filter(Guest.id.in_(guest_ids)).all()
                 guest_names = {g.id: g.name for g in guests}
 
-            # Extraer dicts planos para operar fuera de la sesión
-            active_by_room: dict[str, dict] = {}
+            # Keyed by room id: a renamed room keeps its guest. room_display is
+            # only the fallback for old rows logged without a room_id.
+            display_to_id = {r.display_number: r.id for r in rooms}
+            active_by_room: dict[int, dict] = {}
             for cl in active_log_rows:
-                if cl.room_display and cl.room_display not in active_by_room:
-                    active_by_room[cl.room_display] = {
+                rid = cl.room_id or display_to_id.get(cl.room_display or "")
+                if rid and rid not in active_by_room:
+                    active_by_room[rid] = {
                         "card_log_id": cl.id,
                         "guest_id": cl.guest_id,
                         "guest_name": guest_names.get(cl.guest_id, "") if cl.guest_id else "",
@@ -105,7 +126,7 @@ def build(page: ft.Page) -> ft.Control:
                 for r in rooms
             ]
 
-        occupied_count = sum(1 for rd in rooms_data if rd["display_number"] in active_by_room)
+        occupied_count = sum(1 for rd in rooms_data if rd["id"] in active_by_room)
         free = rooms_count - occupied_count
         active_cards_count = len(active_by_room)
 
@@ -169,7 +190,7 @@ def build(page: ft.Page) -> ft.Control:
         # ── Grid de habitaciones ──
         grid = ft.GridView(
             controls=[
-                _room_tile(page, rd, active_by_room.get(rd["display_number"]), sf, state, refresh)
+                _room_tile(page, rd, active_by_room.get(rd["id"]), sf, state, refresh)
                 for rd in rooms_data
             ],
             runs_count=6,
@@ -337,7 +358,6 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
                     checkout_busy["v"] = False
 
             def _do_physical_checkout(enc):
-                from sqlalchemy import update as sql_update
                 op = state.operator.name if state.operator else "?"
                 with sf() as s:
                     result = _blank_guest_card_for_checkout(
@@ -345,39 +365,21 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
                         hotel=state.hotel,
                         session=s,
                         operator=op,
+                        room=room,
                     )
                     if not result.ok:
-                        # Tarjeta no borrada — no continuar con checkout lógico
+                        # Tarjeta no borrada — no continuar con checkout lógico.
+                        # The service error already says what is on the encoder.
                         show_toast(
                             page,
-                            f"No se pudo borrar la tarjeta física: {result.error or 'error encoder'}. "
-                            "Coloca la tarjeta en el encoder e intenta de nuevo. "
-                            "Si la tarjeta ya no existe, usa Checkout sin encoder.",
+                            f"Checkout no realizado: {result.error or 'error del encoder'}. "
+                            "Si la tarjeta del huésped se perdió, usa Checkout sin encoder.",
                             "error",
                         )
                         return
                     # Tarjeta borrada OK → expirar CardLog + cambiar estado + audit (atómico)
                     try:
-                        now = datetime.now()
-                        s.execute(
-                            sql_update(CardLog)
-                            .where(
-                                CardLog.room_display == room["display_number"],
-                                CardLog.success.is_(True),
-                                CardLog.expires_at > now,
-                            )
-                            .values(expires_at=now)
-                        )
-                        r = s.get(Room, room["id"])
-                        if r is None:
-                            raise ValueError("Habitacion no existe")
-                        r.state = "sucia"
-                        s.add(ActionLog(
-                            action="checkout",
-                            operator=op,
-                            detail=f"Hab. {room['display_number']}",
-                        ))
-                        s.commit()
+                        _finish_checkout(s, room, op, "checkout")
                     except Exception as exc:
                         s.rollback()
                         show_toast(page, f"Error en checkout: {exc}", "error")
@@ -394,30 +396,10 @@ def _open_room_action(page, room: dict, active_info: "dict | None", sf, state, r
             # Checkout lógico: sin encoder, advertencia fuerte
             def confirm_logical():
                 _page_close(page, dlg)
-                from sqlalchemy import update as sql_update
                 op = state.operator.name if state.operator else "?"
                 with sf() as s:
                     try:
-                        now = datetime.now()
-                        s.execute(
-                            sql_update(CardLog)
-                            .where(
-                                CardLog.room_display == room["display_number"],
-                                CardLog.success.is_(True),
-                                CardLog.expires_at > now,
-                            )
-                            .values(expires_at=now)
-                        )
-                        r = s.get(Room, room["id"])
-                        if r is None:
-                            raise ValueError("Habitacion no existe")
-                        r.state = "sucia"
-                        s.add(ActionLog(
-                            action="checkout_logico",
-                            operator=op,
-                            detail=f"Hab. {room['display_number']}",
-                        ))
-                        s.commit()
+                        _finish_checkout(s, room, op, "checkout_logico")
                     except Exception as exc:
                         s.rollback()
                         show_toast(page, f"Error en checkout lógico: {exc}", "error")

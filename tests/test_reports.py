@@ -1,5 +1,5 @@
 """Tests para filtros de reportes."""
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytest
 
 from setra_cards.storage.models import Base, CardLog

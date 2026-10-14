@@ -24,20 +24,36 @@ DES_KEY = b"god\x00\x00\x00\x00\x00"
 BUILDING_ID = 0x01
 
 # --- Card type bytes (block 45, byte 0) ---
-CARD_TYPE_AUTH = 0xC0
-CARD_TYPE_CLOCK = 0xA0
-CARD_TYPE_SETTING = 0x80
-CARD_TYPE_MASTER = 0x40
-CARD_TYPE_LAUNDRY = 0x20
+# byte[0] = original card-type index * 0x10 (SETCARD.INI [0]..[20]).
+# Verified 2026-10-14 against 94 cards emitted by MF_System v5.0.2
+# (log/IssueLog.mdb, column card_date_hex). Before that, MASTER was
+# wrongly 0x40 (= House Keeping) and LAUNDRY 0x20 (= Check Out).
 CARD_TYPE_GUEST = 0x00
+CARD_TYPE_CHECKOUT = 0x20
+CARD_TYPE_FLOOR = 0x30
+CARD_TYPE_HOUSEKEEPING = 0x40
+CARD_TYPE_BUILDING = 0x50
+CARD_TYPE_MASTER = 0x60
+CARD_TYPE_EMERGENCY = 0x70
+CARD_TYPE_SETTING = 0x80
+CARD_TYPE_CLOCK = 0xA0
+CARD_TYPE_AUTH = 0xC0
+
+# SETRA's "Limpieza" card is a short-lived Master (opens every room, expires
+# in hours). Same firmware type; the app tells them apart by its own log.
+CARD_TYPE_LAUNDRY = CARD_TYPE_MASTER
 
 CARD_TYPE_NAMES = {
-    CARD_TYPE_AUTH: "Authorization",
-    CARD_TYPE_CLOCK: "Clock",
-    CARD_TYPE_SETTING: "Setting",
-    CARD_TYPE_MASTER: "Master",
-    CARD_TYPE_LAUNDRY: "Laundry",
     CARD_TYPE_GUEST: "Guest",
+    CARD_TYPE_CHECKOUT: "Check Out",
+    CARD_TYPE_FLOOR: "Floor",
+    CARD_TYPE_HOUSEKEEPING: "House Keeping",
+    CARD_TYPE_BUILDING: "Building",
+    CARD_TYPE_MASTER: "Master",
+    CARD_TYPE_EMERGENCY: "Emergency",
+    CARD_TYPE_SETTING: "Setting",
+    CARD_TYPE_CLOCK: "Clock",
+    CARD_TYPE_AUTH: "Authorization",
 }
 
 # --- Encoder commands (TX bytes) ---

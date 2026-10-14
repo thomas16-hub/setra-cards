@@ -156,7 +156,7 @@ def test_detect_card_happy_path():
     fake = FakeSerial(responses=[
         b"\x03\x00\x04\x00",          # REQUEST_ALL: ATQA 04 00 (1K)
         b"\x05\x00\xaa\xbb\xcc\xdd",  # ANTICOLLISION: uid
-        b"\x02\x00\x08",              # SELECT: SAK 0x08
+        b"\x03\x00\x08\x1f",          # SELECT as captured from the real encoder
     ])
     det = _driver_with(fake).detect_card()
     assert det is not None
@@ -165,11 +165,21 @@ def test_detect_card_happy_path():
     assert det.atqa == b"\x04\x00"
 
 
+def test_detect_card_rejects_three_byte_select():
+    # The old test fixture shape; the real encoder never sends it.
+    fake = FakeSerial(responses=[
+        b"\x03\x00\x04\x00",
+        b"\x05\x00\xaa\xbb\xcc\xdd",
+        b"\x02\x00\x08",
+    ])
+    assert _driver_with(fake).detect_card() is None
+
+
 def test_detect_card_rejects_truncated_anticollision():
     fake = FakeSerial(responses=[
         b"\x03\x00\x04\x00",
         b"\x05\x00\xaa\xbb\xcc",  # LEN says 5 follow, only 3 do
-        b"\x02\x00\x08",
+        b"\x03\x00\x08\x1f",
     ])
     assert _driver_with(fake).detect_card() is None
 

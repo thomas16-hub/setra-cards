@@ -89,8 +89,9 @@ def add_room(session, seq: int, display: str, room_no_id: int) -> Room:
 # --- Fix 1: read_existing_card real dates + integrity fields ---
 
 def test_read_existing_card_exposes_real_dates_and_flags(monkeypatch, encoder, hotel):
-    d1 = datetime(2026, 6, 1, 14, 0)
-    d2 = datetime(2026, 6, 20, 12, 0)
+    # Relative dates: a fixed checkout date turns this test red once it passes.
+    d1 = (datetime.now() - timedelta(days=1)).replace(second=0, microsecond=0)
+    d2 = (datetime.now() + timedelta(days=5)).replace(second=0, microsecond=0)
     monkeypatch.setattr(cs, "read_card", lambda *a, **k: make_decoded(date1=d1, date2=d2))
 
     ok, msg, info = cs.read_existing_card(encoder=encoder, hotel=hotel)
@@ -199,8 +200,9 @@ def test_blank_refuses_type_mismatch(monkeypatch, encoder, hotel, session):
 
     assert result.ok is False
     assert "Maestra" in result.error
-    assert "no coincide" in result.error
-    assert "Forzar" in result.error
+    assert "no la esperada" in result.error
+    # No "use Forzar" hint: the UI has no force button to offer.
+    assert "No se borró" in result.error
     assert blanked == [], "blank_card must not run on refused mismatch"
 
 
@@ -229,7 +231,126 @@ def test_blank_unreadable_card_with_expect_refuses(monkeypatch, encoder, hotel, 
     )
 
     assert result.ok is False
-    assert "Forzar" in result.error
+    assert "No se borró" in result.error
+
+
+# --- 2026-10-14 scan fixes ---
+
+def test_blank_refuses_when_card_differs_from_confirmed_uid(monkeypatch, encoder, hotel, session):
+    monkeypatch.setattr(cs, "read_card", lambda *a, **k: make_decoded())
+    blanked = []
+    monkeypatch.setattr(cs, "blank_card", lambda *a, **k: blanked.append(1) or WriteResult(True, UID))
+
+    result = cs.blank_existing_card(
+        encoder=encoder, hotel=hotel, session=session, operator="t",
+        expect_uid=b"\x09\x09\x09\x09", force=True,
+    )
+
+    assert result.ok is False
+    assert blanked == []
+
+
+def test_checkout_blank_refuses_another_rooms_guest_card(monkeypatch, encoder, hotel, session):
+    monkeypatch.setattr(cs, "read_card", lambda *a, **k: make_decoded(building=1, floor=2, room_no_id=3))
+    blanked = []
+    monkeypatch.setattr(cs, "blank_card", lambda *a, **k: blanked.append(1) or WriteResult(True, UID))
+
+    result = cs.blank_existing_card(
+        encoder=encoder, hotel=hotel, session=session, operator="t",
+        expect_card_type=CARD_TYPE_GUEST, expect_room=(1, 2, 4),
+    )
+
+    assert result.ok is False
+    assert "otra habitación" in result.error
+    assert blanked == []
+
+
+def test_blank_passes_the_inspected_uid_to_the_writer(monkeypatch, encoder, hotel, session):
+    monkeypatch.setattr(cs, "read_card", lambda *a, **k: make_decoded())
+    seen = {}
+
+    def fake_blank(*a, **k):
+        seen.update(k)
+        return WriteResult(True, UID)
+
+    monkeypatch.setattr(cs, "blank_card", fake_blank)
+    cs.blank_existing_card(encoder=encoder, hotel=hotel, session=session, operator="t")
+    assert seen["expected_uid"] == UID
+
+
+@pytest.mark.parametrize("legacy_byte", [0x40, 0x20])
+def test_old_master_and_laundry_cards_are_flagged_for_reissue(monkeypatch, encoder, hotel, legacy_byte):
+    monkeypatch.setattr(cs, "read_card", lambda *a, **k: make_decoded(card_type=legacy_byte))
+
+    ok, msg, info = cs.read_existing_card(encoder=encoder, hotel=hotel)
+
+    assert ok is True
+    assert "RE-EMITIR" in msg
+    assert "antigua" in info["tipo"]
+    assert "RE-EMITIR" in info["estado"]
+
+
+def test_clock_card_is_never_shown_as_expired(monkeypatch, encoder, hotel):
+    from setra_cards.encoder.protocol import CARD_TYPE_CLOCK
+
+    monkeypatch.setattr(cs, "read_card", lambda *a, **k: make_decoded(
+        card_type=CARD_TYPE_CLOCK, date2=datetime(2001, 3, 1, 1, 0)))
+
+    ok, msg, info = cs.read_existing_card(encoder=encoder, hotel=hotel)
+
+    assert info["expired"] is False
+    assert info["valid_until"] is None
+    assert "VENCIDA" not in msg
+
+
+@pytest.mark.parametrize(("role", "hours", "allowed"), [
+    ("frontdesk", 10, True),
+    ("frontdesk", 11, False),
+    (None, 11, False),          # unknown role gets the front-desk cap
+    ("manager", 24, True),
+    ("super_manager", 20, True),
+])
+def test_laundry_duration_is_capped_by_role(monkeypatch, encoder, hotel, session, role, hours, allowed):
+    written = []
+    monkeypatch.setattr(cs, "write_card", lambda *a, **k: written.append(1) or WriteResult(True, UID))
+
+    result = cs.create_laundry_card(
+        encoder=encoder, hotel=hotel, session=session, hours=hours,
+        operator="t", operator_role=role,
+    )
+
+    assert result.ok is allowed
+    assert bool(written) is allowed
+    if not allowed:
+        assert "máximo 10 horas" in result.error
+
+
+@pytest.mark.parametrize("role", ["frontdesk", None])
+def test_manager_cards_are_refused_in_the_service_for_front_desk(monkeypatch, encoder, hotel, session, role):
+    written = []
+    monkeypatch.setattr(cs, "write_card", lambda *a, **k: written.append(1) or WriteResult(True, UID))
+    room = add_room(session, 1, "101", 1)
+    results = [
+        cs.create_master_card(encoder=encoder, hotel=hotel, session=session,
+                              valid_until=datetime.now() + timedelta(days=1), operator="t", operator_role=role),
+        cs.create_auth_card(encoder=encoder, hotel=hotel, session=session, operator="t", operator_role=role),
+        cs.create_clock_card(encoder=encoder, hotel=hotel, session=session, operator="t", operator_role=role),
+        cs.create_setting_card(encoder=encoder, hotel=hotel, session=session, room=room,
+                               operator="t", operator_role=role),
+    ]
+    assert all(r.ok is False for r in results)
+    assert all("gerente" in r.error for r in results)
+    assert written == []
+
+
+def test_card_from_another_system_signature_is_flagged(monkeypatch, encoder, hotel):
+    decoded = make_decoded()
+    foreign = type(decoded)(**{**vars(decoded), "signature": b"\xd6\x4d"})
+    monkeypatch.setattr(cs, "read_card", lambda *a, **k: foreign)
+
+    ok, msg, _info = cs.read_existing_card(encoder=encoder, hotel=hotel)
+
+    assert "otro hotel" in msg
 
 
 def test_blank_without_expect_keeps_working_and_logs_room(monkeypatch, encoder, hotel, session):
@@ -274,22 +395,22 @@ def _call_guest(session, encoder, hotel, room):
 
 
 def _call_master(session, encoder, hotel, room):
-    return cs.create_master_card(
+    return cs.create_master_card(operator_role="manager", 
         encoder=encoder, hotel=hotel, session=session,
         valid_until=datetime.now() + timedelta(days=30), operator="t",
     )
 
 
 def _call_auth(session, encoder, hotel, room):
-    return cs.create_auth_card(encoder=encoder, hotel=hotel, session=session, operator="t")
+    return cs.create_auth_card(operator_role="manager", encoder=encoder, hotel=hotel, session=session, operator="t")
 
 
 def _call_clock(session, encoder, hotel, room):
-    return cs.create_clock_card(encoder=encoder, hotel=hotel, session=session, operator="t")
+    return cs.create_clock_card(operator_role="manager", encoder=encoder, hotel=hotel, session=session, operator="t")
 
 
 def _call_setting(session, encoder, hotel, room):
-    return cs.create_setting_card(
+    return cs.create_setting_card(operator_role="manager", 
         encoder=encoder, hotel=hotel, session=session, room=room, operator="t",
     )
 
@@ -376,7 +497,7 @@ def test_laundry_log_has_valid_from(monkeypatch, encoder, hotel, session):
 def test_auth_log_has_valid_from_and_30_day_expiry(monkeypatch, encoder, hotel, session):
     monkeypatch.setattr(cs, "write_card", lambda *a, **k: WriteResult(True, UID))
 
-    result = cs.create_auth_card(encoder=encoder, hotel=hotel, session=session, operator="t")
+    result = cs.create_auth_card(operator_role="manager", encoder=encoder, hotel=hotel, session=session, operator="t")
 
     assert result.ok is True
     row = session.query(CardLog).order_by(CardLog.id.desc()).first()

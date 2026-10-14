@@ -8,8 +8,9 @@ echo ============================================
 echo   SETRA CARDS - Recuperar PIN del Admin
 echo ============================================
 echo.
-echo  Este script resetea el PIN del operador
-echo  Admin (o el super_manager) a: 1234
+echo  Este script le asigna al operador Admin
+echo  (o al super_manager) un PIN temporal nuevo
+echo  y lo muestra en esta ventana. Anotelo.
 echo.
 echo  Al abrir la app, te pedira cambiar el PIN
 echo  inmediatamente.

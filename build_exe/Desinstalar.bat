@@ -38,6 +38,7 @@ if exist "%STARTUP_SHORTCUT%" del /Q "%STARTUP_SHORTCUT%"
 
 echo [3/4] Eliminando la aplicacion...
 if exist "%INSTALL_DIR%" rmdir /S /Q "%INSTALL_DIR%"
+if exist "%INSTALL_DIR%.prev" rmdir /S /Q "%INSTALL_DIR%.prev"
 
 echo [4/4] Eliminando datos...
 if exist "%DATA_DIR%" rmdir /S /Q "%DATA_DIR%"

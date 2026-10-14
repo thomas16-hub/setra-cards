@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 # Expected total RX frame lengths (<LEN> byte included) for known commands.
 ACK_FRAME_LEN = 2            # <01> <status>
 ANTICOLLISION_FRAME_LEN = 6  # <05> <status> <uid:4>
-SELECT_FRAME_LEN = 3         # <02> <status> <sak>
+# Real encoder answers Select with 4 bytes: <03> <status> <sak> <xx>
+# (159/159 captures in locstar-locks/*.log, e.g. "03 00 08 1f").
+SELECT_FRAME_LEN = 4
 READ_FRAME_LEN = 18          # <11> <status> <data:16>
 
 

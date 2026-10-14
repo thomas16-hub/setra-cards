@@ -192,13 +192,14 @@ def open_shell(page: ft.Page) -> None:
         padding=ft.Padding(16, 22, 14, 14),
     )
 
+    fallback = state.hotel.is_fallback
     hotel_chip = ft.Container(
         content=ft.Column(
             [
                 ft.Text(
-                    "HOTEL CONFIGURADO",
+                    "SIN CONFIGURAR" if fallback else "HOTEL CONFIGURADO",
                     size=9,
-                    color=theme.TEXT_LIGHT,
+                    color=theme.WARNING if fallback else theme.TEXT_LIGHT,
                     weight=ft.FontWeight.W_700,
                 ),
                 ft.Text(
@@ -207,6 +208,12 @@ def open_shell(page: ft.Page) -> None:
                     color=theme.TEXT,
                     weight=ft.FontWeight.W_600,
                 ),
+                ft.Text(
+                    "Falta hotel.json: reinstale eligiendo el hotel",
+                    size=10,
+                    color=theme.WARNING,
+                    visible=fallback,
+                ),
             ],
             spacing=2,
             tight=True,
@@ -214,7 +221,7 @@ def open_shell(page: ft.Page) -> None:
         padding=ft.Padding(14, 10, 14, 10),
         margin=ft.Margin(12, 0, 12, 12),
         bgcolor=theme.SURFACE_ALT,
-        border=ft.Border.all(1, theme.BORDER),
+        border=ft.Border.all(1, theme.WARNING if fallback else theme.BORDER),
         border_radius=10,
     )
 

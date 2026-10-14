@@ -71,6 +71,20 @@ class TestCheckoutBlankGuard:
         assert captured["expect_card_type"] == CARD_TYPE_GUEST
         assert "force" not in captured  # checkout has no force escape hatch
 
+    def test_checkout_only_blanks_this_rooms_card(self, monkeypatch):
+        captured: dict = {}
+
+        def fake_blank(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(ok=True, error=None, uid_hex="AA:BB")
+
+        monkeypatch.setattr(dashboard_view, "blank_existing_card", fake_blank)
+        dashboard_view._blank_guest_card_for_checkout(
+            encoder=object(), hotel=object(), session=object(), operator="tester",
+            room={"building": 1, "floor": 3, "room_no_id": 4},
+        )
+        assert captured["expect_room"] == (1, 3, 4)
+
     def test_physical_checkout_uses_guarded_helper(self):
         src = inspect.getsource(dashboard_view._open_room_action)
         assert "_blank_guest_card_for_checkout(" in src
@@ -79,12 +93,14 @@ class TestCheckoutBlankGuard:
             "_blank_guest_card_for_checkout(", ""
         )
 
-    def test_generic_admin_blank_has_no_type_expectation(self):
-        # The "Borrar tarjeta" button must still wipe ANY card type:
-        # no expect_card_type= keyword passed to the service.
+    def test_generic_blank_reads_and_confirms_the_exact_card(self):
+        # "Borrar" may still wipe any type, but only after showing the card
+        # and only that card: it reads first, confirms, then binds type + UID.
         src = inspect.getsource(cards_view._instant_form)
-        assert "blank_existing_card" in src
-        assert "expect_card_type=" not in src
+        assert "read_existing_card" in src
+        assert "confirm_dialog(" in src
+        assert "expect_uid=" in src
+        assert "GLOBAL_CARD_TYPES" in src
 
 
 # --- 2) diagnostic read screen rendering ------------------------------------

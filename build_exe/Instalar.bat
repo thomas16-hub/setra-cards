@@ -128,6 +128,7 @@ echo.
 echo   * Acceso directo en el Escritorio
 echo   * Arranca automaticamente al prender el PC
 echo   * Datos en: %LOCALAPPDATA%\SETRA\SetraCARDS\
-echo   * Admin inicial:  Admin / PIN 1234  (cambiar al primer login)
+echo   * Admin inicial:  Admin. El PIN aparece UNA vez en la pantalla
+echo     de ingreso al abrir la app por primera vez. Anotelo.
 echo.
 pause

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Only 0x00 has been verified against real lock audit trails (PROTOCOL.md §7).
 # Any other type byte gets a raw-hex label marked "(sin verificar)" — we do
 # NOT invent semantics for unverified bytes (they previously contradicted the
-# card-type convention: 0x20 Laundry, 0x40 Master, 0x80 Setting, 0xC0 Auth).
+# card-type convention: 0x60 Master, 0x80 Setting, 0xA0 Clock, 0xC0 Auth).
 EVENT_TYPE_NAMES = {
     0x00: "Apertura con tarjeta (0x00)",
 }

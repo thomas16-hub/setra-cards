@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import and_, or_
 from sqlalchemy import update as sql_update
 from sqlalchemy.orm import Session
 
@@ -22,13 +23,15 @@ from setra_cards.cards.builder import (
 )
 from setra_cards.cards.reader import DecodedCard, read_card
 from setra_cards.cards.s70_reader import read_s70_card
-from setra_cards.cards.writer import blank_card, write_card
+from setra_cards.cards.writer import ENCODER_DISCONNECTED_ERROR, blank_card, write_card
 from setra_cards.core.app_state import HotelConfig
 from setra_cards.encoder.driver import EncoderDriver
 from setra_cards.encoder.protocol import (
     CARD_TYPE_AUTH,
+    CARD_TYPE_CHECKOUT,
     CARD_TYPE_CLOCK,
     CARD_TYPE_GUEST,
+    CARD_TYPE_HOUSEKEEPING,
     CARD_TYPE_LAUNDRY,
     CARD_TYPE_MASTER,
     CARD_TYPE_SETTING,
@@ -46,12 +49,45 @@ BUSY_ERROR = "Operación en curso — espere a que termine la grabación actual"
 # Operator-facing card type labels (Spanish) keyed by protocol type byte.
 CARD_TYPE_LABELS_ES: dict[int, str] = {
     CARD_TYPE_GUEST: "Huésped",
-    CARD_TYPE_LAUNDRY: "Limpieza",
-    CARD_TYPE_MASTER: "Maestra",
+    # Limpieza shares the Master type byte (0x60): a card read back off the
+    # encoder cannot tell them apart, only the issue log can.
+    CARD_TYPE_MASTER: "Maestra / Limpieza",
     CARD_TYPE_SETTING: "Configuración",
     CARD_TYPE_CLOCK: "Reloj",
     CARD_TYPE_AUTH: "Autorización",
+    # Bytes Setra CARDS wrongly wrote before 2026-10-14 for Maestra (0x40)
+    # and Limpieza (0x20). Hotels reported those Maestras opened no door.
+    CARD_TYPE_HOUSEKEEPING: "Maestra antigua (re-emitir)",
+    CARD_TYPE_CHECKOUT: "Limpieza antigua (re-emitir)",
 }
+
+LEGACY_GLOBAL_TYPES = (CARD_TYPE_HOUSEKEEPING, CARD_TYPE_CHECKOUT)
+LEGACY_GLOBAL_STATUS = "Tarjeta de una versión anterior de Setra CARDS: puede no abrir. RE-EMITIR"
+
+# Limpieza opens every room, so its duration is capped by role.
+FRONTDESK_LAUNDRY_MAX_HOURS = 10
+MANAGER_LAUNDRY_MAX_HOURS = 24
+
+
+def _manager_only(operator_role: str | None, card_label: str) -> CardResult | None:
+    """Refuse manager-level cards in the service, not only by hiding the tab.
+
+    Returns a failed CardResult for roles below manager, None when allowed.
+    """
+    from setra_cards.services.auth import role_has_access
+
+    if role_has_access(operator_role, "manager"):
+        return None
+    return CardResult(False, card_label, error="Solo un gerente puede emitir esta tarjeta")
+
+
+def laundry_max_hours(operator_role: str | None) -> int:
+    from setra_cards.services.auth import role_has_access
+
+    if role_has_access(operator_role, "manager"):
+        return MANAGER_LAUNDRY_MAX_HOURS
+    return FRONTDESK_LAUNDRY_MAX_HOURS
+
 
 # CardLog.card_type_byte sentinel for blank operations on unreadable cards.
 BLANK_TYPE_BYTE = 0xFF
@@ -112,17 +148,24 @@ def _log_emission(
 
 def invalidate_active_guest_cards(
     session: Session, room_id: int, *, now: datetime | None = None,
+    legacy_display: str | None = None,
 ) -> int:
     """Expire all still-active Guest CardLog rows for a room.
 
+    Keyed by room_id, so renaming a room never orphans its guest card.
+    legacy_display also expires old rows logged without a room_id.
     Does NOT commit — the caller owns the transaction boundary.
     Returns the number of rows expired.
     """
     effective_now = now or datetime.now()
+    room_match = CardLog.room_id == room_id
+    if legacy_display:
+        room_match = or_(room_match, and_(CardLog.room_id.is_(None),
+                                          CardLog.room_display == legacy_display))
     stmt = (
         sql_update(CardLog)
         .where(
-            CardLog.room_id == room_id,
+            room_match,
             CardLog.card_type == "Guest",
             CardLog.success.is_(True),
             CardLog.expires_at > effective_now,
@@ -157,7 +200,6 @@ def create_guest_card(
 
     try:
         card_data = build_guest_card(
-            room=int(room.sequential_id),
             now=valid_from,
             checkout=valid_until,
             sig=hotel.signature,
@@ -244,6 +286,8 @@ def change_guest_room(
         # 1) Leer tarjeta actual para validar que es Guest de old_room
         decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
         if not decoded:
+            if not getattr(encoder, "is_open", True):
+                return CardResult(False, "Guest", error=ENCODER_DISCONNECTED_ERROR)
             return CardResult(False, "Guest", error="No se pudo leer la tarjeta. Coloquela en el encoder.")
         if not decoded.checksum_valid or not decoded.uid_match:
             return CardResult(
@@ -286,7 +330,6 @@ def change_guest_room(
         # 3) Reescribir la tarjeta con los datos de new_room
         try:
             card_data = build_guest_card(
-                room=int(new_room.sequential_id),
                 now=now,
                 checkout=valid_until,
                 sig=hotel.signature,
@@ -298,8 +341,9 @@ def change_guest_room(
             logger.exception("Error construyendo guest card en change_guest_room")
             return CardResult(False, "Guest", error=f"Error interno: {exc}")
 
+        # expected_uid: only rewrite the card that was just validated as old_room's.
         result = write_card(encoder, hotel.sector, hotel.signature, card_data, hotel.des_key,
-                            building=new_room.building)
+                            building=new_room.building, expected_uid=decoded.uid)
         uid_hex = result.uid.hex(":") if result.uid else None
         if not result.success:
             _log_emission(
@@ -347,8 +391,10 @@ def change_guest_room(
 
 def create_master_card(
     *, encoder: EncoderDriver, hotel: HotelConfig, session: Session,
-    valid_until: datetime, operator: str,
+    valid_until: datetime, operator: str, operator_role: str | None,
 ) -> CardResult:
+    if refused := _manager_only(operator_role, "Master"):
+        return refused
     now = datetime.now()
     if valid_until <= now:
         return CardResult(False, "Master", error="La fecha de vencimiento debe ser futura")
@@ -389,7 +435,10 @@ def create_master_card(
 
 def create_auth_card(
     *, encoder: EncoderDriver, hotel: HotelConfig, session: Session, operator: str,
+    operator_role: str | None,
 ) -> CardResult:
+    if refused := _manager_only(operator_role, "Auth"):
+        return refused
     now = datetime.now()
     try:
         card_data = build_auth_card(now=now, sig=hotel.signature)
@@ -427,7 +476,10 @@ def create_auth_card(
 
 def create_clock_card(
     *, encoder: EncoderDriver, hotel: HotelConfig, session: Session, operator: str,
+    operator_role: str | None,
 ) -> CardResult:
+    if refused := _manager_only(operator_role, "Clock"):
+        return refused
     now = datetime.now()
     try:
         card_data = build_clock_card(now=now, sig=hotel.signature)
@@ -458,11 +510,13 @@ def create_clock_card(
 
 def create_setting_card(
     *, encoder: EncoderDriver, hotel: HotelConfig, session: Session, room: Room, operator: str,
+    operator_role: str | None,
 ) -> CardResult:
+    if refused := _manager_only(operator_role, "Setting"):
+        return refused
     now = datetime.now()
     try:
         card_data = build_setting_card(
-            room=int(room.sequential_id),
             building=room.building,
             floor=room.floor,
             room_no_id=room.room_no_id,
@@ -510,18 +564,29 @@ def create_laundry_card(
     session: Session,
     hours: int = 8,
     operator: str,
+    operator_role: str | None = None,
     staff_name: str | None = None,
     assigned_rooms: list[str] | None = None,
 ) -> CardResult:
     """Tarjeta de limpieza valida por N horas.
 
-    El protocolo Locstar graba room=0x00 (acceso global a todo el hotel).
-    No es posible restringir a habitaciones específicas a nivel de firmware.
+    It is a short-lived Master: it opens EVERY room until it expires.
+    Decision 2026-10-14 (Thomas): front desk may issue it for at most
+    FRONTDESK_LAUNDRY_MAX_HOURS; only a manager may go longer. An unknown
+    role gets the front-desk limit (fail safe).
     Las habitaciones asignadas al staff se registran en el audit log para
     trazabilidad aunque físicamente la tarjeta abra todas.
     """
     if hours <= 0:
         return CardResult(False, "Limpieza", error="La duración debe ser mayor a 0 horas")
+    if hours > laundry_max_hours(operator_role):
+        return CardResult(
+            False, "Limpieza",
+            error=(
+                f"Recepción puede emitir Limpieza por máximo {FRONTDESK_LAUNDRY_MAX_HOURS} horas. "
+                "Para más tiempo, pídasela a un gerente"
+            ),
+        )
 
     now = datetime.now()
     expire = now + timedelta(hours=hours)
@@ -591,6 +656,8 @@ def _decoded_room_display(decoded: DecodedCard) -> str | None:
 def blank_existing_card(
     *, encoder: EncoderDriver, hotel: HotelConfig, session: Session, operator: str,
     expect_card_type: int | None = None,
+    expect_uid: bytes | None = None,
+    expect_room: tuple[int, int, int] | None = None,
     force: bool = False,
 ) -> CardResult:
     """Blank the card currently on the encoder.
@@ -599,7 +666,8 @@ def blank_existing_card(
     log (a wiped Master is no longer anonymous). When ``expect_card_type`` is
     given and the card on the encoder does not match (or cannot be read), the
     blank is refused unless ``force=True`` — this protects global
-    Master/Laundry cards from accidental wipes.
+    Master/Laundry cards from accidental wipes. ``expect_uid`` (the card the
+    operator confirmed on screen) is enforced even with ``force``.
     """
     # Read-first + blank is ONE encoder operation — fail-fast so the pre-blank
     # read and the blank write can never be split by another in-flight write.
@@ -613,17 +681,34 @@ def blank_existing_card(
         except Exception:
             logger.exception("Pre-blank read failed; proceeding without decoded card info")
 
+        if expect_uid is not None and (decoded is None or decoded.uid != expect_uid):
+            return CardResult(
+                False, "Blank",
+                error="La tarjeta en el encoder no es la que confirmó. No se borró nada",
+            )
+
         if expect_card_type is not None and not force:
             if decoded is None:
                 return CardResult(
                     False, "Blank",
-                    error="No se pudo leer la tarjeta para verificar su tipo — use Forzar si está seguro",
+                    error="No se pudo leer la tarjeta para verificar su tipo. No se borró",
                 )
             if decoded.card_type != expect_card_type:
                 tipo = _card_type_label(decoded.card_type)
                 return CardResult(
                     False, "Blank",
-                    error=f"La tarjeta en el encoder es {tipo}, no coincide — use Forzar si está seguro",
+                    error=f"La tarjeta en el encoder es {tipo}, no la esperada. No se borró",
+                )
+            # expect_room = (building, floor, room_no_id): checkout must only
+            # wipe the guest card of the room being checked out.
+            card_room = (decoded.building, decoded.floor, decoded.room_no_id)
+            if expect_room is not None and card_room != expect_room:
+                return CardResult(
+                    False, "Blank",
+                    error=(
+                        f"La tarjeta es de otra habitación (edif {card_room[0]} piso {card_room[1]} "
+                        f"hab {card_room[2]}). No se borró"
+                    ),
                 )
 
         # Traceability: record WHAT is being wiped in the Blank CardLog row.
@@ -637,7 +722,12 @@ def blank_existing_card(
             wiped_room_display = None
             wiped_label = "ilegible"
 
-        result = blank_card(encoder, hotel.sector)
+        # Bind the wipe to the card that was inspected above: a swap between
+        # the read and the blank must not erase a different card.
+        result = blank_card(
+            encoder, hotel.sector,
+            expected_uid=decoded.uid if decoded is not None else None,
+        )
         uid_hex = result.uid.hex(":") if result.uid else None
         if not result.success:
             _log_emission(
@@ -685,12 +775,18 @@ def read_existing_card(
     with emission_transaction(blocking=True):
         decoded = read_card(encoder, hotel.sector, hotel.signature, des_key=hotel.des_key)
     if not decoded:
+        if not getattr(encoder, "is_open", True):
+            return False, ENCODER_DISCONNECTED_ERROR, {}
         return False, "No se pudo leer la tarjeta — coloquela en el encoder", {}
 
     now = datetime.now()
-    expired = bool(decoded.date2 is not None and decoded.date2 < now)
+    # A Clock card has no expiry: bytes 7-11 are weekday/flags, not a date.
+    has_expiry = decoded.card_type != CARD_TYPE_CLOCK
+    valid_until = decoded.date2 if has_expiry else None
+    expired = bool(valid_until is not None and valid_until < now)
     # is_blank is a new reader flag; getattr keeps this working until it lands.
     is_blank = bool(getattr(decoded, "is_blank", False))
+    foreign_signature = decoded.signature != hotel.signature.signature
 
     info = {
         "card_type_byte": decoded.card_type,
@@ -702,7 +798,7 @@ def read_existing_card(
         "floor": decoded.floor,
         "room_no_id": decoded.room_no_id,
         "valid_from": decoded.date1,
-        "valid_until": decoded.date2,
+        "valid_until": valid_until,
         "checksum_valid": decoded.checksum_valid,
         "uid_match": decoded.uid_match,
         "signature": decoded.signature.hex(" ").upper(),
@@ -711,6 +807,8 @@ def read_existing_card(
 
     if not is_blank and decoded.card_type in (CARD_TYPE_MASTER, CARD_TYPE_LAUNDRY):
         info["estado"] = _global_card_status(decoded)
+    elif not is_blank and decoded.card_type in LEGACY_GLOBAL_TYPES:
+        info["estado"] = LEGACY_GLOBAL_STATUS
 
     if is_blank:
         message = "Tarjeta EN BLANCO"
@@ -718,6 +816,10 @@ def read_existing_card(
         message = "Tarjeta CORRUPTA (checksum inválido)"
     elif not decoded.uid_match:
         message = "Tarjeta de otro sistema (UID/DES no coincide)"
+    elif foreign_signature:
+        message = "Tarjeta de otro hotel o sistema (firma distinta): no abre aquí"
+    elif decoded.card_type in LEGACY_GLOBAL_TYPES:
+        message = "Tarjeta antigua — RE-EMITIR"
     elif expired:
         message = "Tarjeta leida — VENCIDA"
     else:

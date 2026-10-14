@@ -32,15 +32,25 @@ from setra_cards.ui.components import (
     PrimaryButton,
     SecondaryButton,
     SectionCard,
+    confirm_dialog,
     make_busy_guard,
     op_spinner,
     show_toast,
 )
+from setra_cards.encoder.protocol import (
+    CARD_TYPE_CHECKOUT,
+    CARD_TYPE_HOUSEKEEPING,
+    CARD_TYPE_MASTER,
+)
+
+# Type bytes that open every door (or did, in the old encoding): only a
+# manager may wipe them.
+GLOBAL_CARD_TYPES = (CARD_TYPE_MASTER, CARD_TYPE_HOUSEKEEPING, CARD_TYPE_CHECKOUT)
 
 # (key, label, icon, descripcion, min_role). min_role=None → todos los roles
 CARD_KINDS = [
     ("guest",    "Huesped",      ft.Icons.BADGE_OUTLINED,             "Abre una habitacion hasta el checkout",   None),
-    ("laundry",  "Limpieza",     ft.Icons.CLEANING_SERVICES_OUTLINED, "Acceso para personal de limpieza por horas", None),
+    ("laundry",  "Limpieza",     ft.Icons.CLEANING_SERVICES_OUTLINED, "Abre todas las habitaciones por unas horas", None),
     ("master",   "Maestra",      ft.Icons.KEY,                        "Abre todas las habitaciones",             "manager"),
     ("auth",     "Autorizacion", ft.Icons.VERIFIED,                   "Programar cerraduras nuevas",             "manager"),
     ("clock",    "Reloj",        ft.Icons.SCHEDULE,                   "Sincroniza hora en las cerraduras",       "manager"),
@@ -212,8 +222,17 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         expand=True,
     )
 
-    now = datetime.now()
-    default_checkout = (now + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    # Hotel checkout hour (Ruiseñor is 13:00), same rule as the Hub check-in.
+    try:
+        co_h, co_m = (int(x) for x in state.hotel.checkout_time.split(":"))
+    except (AttributeError, ValueError):
+        co_h, co_m = 12, 0
+
+    def _checkout_after(days: int) -> datetime:
+        return (datetime.now() + timedelta(days=days)).replace(
+            hour=co_h, minute=co_m, second=0, microsecond=0)
+
+    default_checkout = _checkout_after(1)
 
     checkout_date = ft.TextField(
         label="Fecha de salida (YYYY-MM-DD)",
@@ -233,7 +252,7 @@ def _guest_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
 
     def on_days_change(e: ft.ControlEvent) -> None:
         days = int(e.control.value)
-        co = (datetime.now() + timedelta(days=days)).replace(hour=12, minute=0, second=0, microsecond=0)
+        co = _checkout_after(days)
         checkout_date.value = co.strftime("%Y-%m-%d")
         checkout_time.value = co.strftime("%H:%M")
         page.update()
@@ -351,8 +370,10 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
         expires_display.value = (datetime.now() + timedelta(hours=h)).strftime("%d/%m/%Y %H:%M")
         page.update()
 
+    # Front desk is capped (it opens every room); the service enforces it too.
+    max_hours = card_service.laundry_max_hours(state.operator.role if state.operator else None)
     hours_slider = ft.Slider(
-        min=1, max=24, divisions=23, value=8,
+        min=1, max=max_hours, divisions=max_hours - 1, value=min(8, max_hours),
         active_color=theme.GOLD, thumb_color=theme.GOLD,
         on_change=on_hours_change,
     )
@@ -443,6 +464,7 @@ def _laundry_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 session=s,
                 hours=hours_val["v"],
                 operator=state.operator.name if state.operator else "?",
+                operator_role=state.operator.role if state.operator else None,
                 staff_name=staff_name,
                 assigned_rooms=sorted(selected_rooms) if selected_rooms else None,
             )
@@ -548,6 +570,7 @@ def _master_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
                 encoder=enc, hotel=state.hotel, session=s,
                 valid_until=exp,
                 operator=state.operator.name if state.operator else "?",
+                operator_role=state.operator.role if state.operator else None,
             )
         _show_card_result(result_host, result)
 
@@ -604,6 +627,7 @@ def _setting_form(page: ft.Page, result_host: ft.Container) -> ft.Control:
             result = card_service.create_setting_card(
                 encoder=enc, hotel=state.hotel, session=s, room=room,
                 operator=state.operator.name if state.operator else "?",
+                operator_role=state.operator.role if state.operator else None,
             )
         _show_card_result(result_host, result)
 
@@ -639,9 +663,61 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
     labels = {
         "auth": ("Tarjeta de autorizacion", "Graba una tarjeta para autorizar cerraduras nuevas.", "Grabar Auth", ft.Icons.VERIFIED),
         "clock": ("Tarjeta de reloj", "Sincroniza la fecha/hora en las cerraduras.", "Grabar Clock", ft.Icons.SCHEDULE),
-        "blank": ("Borrar tarjeta", "Coloca la tarjeta que quieres borrar en el encoder.", "Borrar tarjeta", ft.Icons.DELETE_SWEEP_OUTLINED),
+        "blank": ("Borrar tarjeta", "Coloca la tarjeta en el encoder: primero se lee y te muestra qué es antes de borrarla.", "Leer y borrar", ft.Icons.DELETE_SWEEP_OUTLINED),
     }
     title, hint, btn_label, icon = labels[kind]
+
+    def do_blank(expect_uid: bytes, expect_type: int | None) -> None:
+        # Re-read the encoder: the watchdog may have replaced it while the
+        # confirmation dialog was open.
+        enc = state.encoder
+        if enc is None:
+            show_toast(page, "Encoder no conectado", "error")
+            return
+        op = state.operator.name if state.operator else "?"
+        with sf() as s:
+            result = card_service.blank_existing_card(
+                encoder=enc, hotel=state.hotel, session=s, operator=op,
+                expect_card_type=expect_type, expect_uid=expect_uid,
+            )
+        _show_card_result(result_host, result)
+
+    def read_then_confirm_blank(enc) -> None:
+        """Show the operator WHAT is on the encoder, then ask before wiping."""
+        ok, msg, info = card_service.read_existing_card(encoder=enc, hotel=state.hotel)
+        if not ok:
+            show_toast(page, msg, "error")
+            return
+        uid = bytes.fromhex(info["uid"].replace(":", ""))
+        if "EN BLANCO" in msg:
+            # Data already zero, but a half-finished blank can leave the system
+            # trailer behind: allow resetting it, bound to this exact card.
+            confirm_dialog(
+                page,
+                "La tarjeta ya está en blanco",
+                f"UID: {info['uid']}\n\n¿Restablecerla de todas formas?",
+                on_confirm=lambda: run_busy(lambda: do_blank(uid, None)),
+                confirm_label="Restablecer",
+            )
+            return
+        type_byte = info["card_type_byte"]
+        op_role = state.operator.role if state.operator else None
+        if type_byte in GLOBAL_CARD_TYPES and not role_has_access(op_role, "manager"):
+            show_toast(page, "Solo un gerente puede borrar una tarjeta Maestra o de Limpieza", "error")
+            return
+        details = [f"Tipo: {info['tipo']}", f"UID: {info['uid']}"]
+        if info.get("card_type_name") in ("Guest", "Setting"):
+            details.append(f"Edificio {info['building']} · Piso {info['floor']} · Hab {info['room_no_id']}")
+        if info.get("valid_until"):
+            details.append(f"Vence: {_fmt_card_dt(info['valid_until'])}")
+        confirm_dialog(
+            page,
+            "¿Borrar esta tarjeta?",
+            "\n".join(details) + "\n\nDeja de abrir puertas de inmediato.",
+            on_confirm=lambda: run_busy(lambda: do_blank(uid, type_byte)),
+            confirm_label="Borrar",
+            danger=True,
+        )
 
     def do_emit() -> None:
         # Snapshot once: the watchdog can clear/replace state.encoder mid-op.
@@ -649,16 +725,18 @@ def _instant_form(page: ft.Page, result_host: ft.Container, kind: str) -> ft.Con
         if enc is None:
             show_toast(page, "Encoder no conectado", "error")
             return
+        if kind == "blank":
+            read_then_confirm_blank(enc)
+            return
         op = state.operator.name if state.operator else "?"
+        role = state.operator.role if state.operator else None
         with sf() as s:
             if kind == "auth":
-                result = card_service.create_auth_card(encoder=enc, hotel=state.hotel, session=s, operator=op)
-            elif kind == "clock":
-                result = card_service.create_clock_card(encoder=enc, hotel=state.hotel, session=s, operator=op)
+                result = card_service.create_auth_card(
+                    encoder=enc, hotel=state.hotel, session=s, operator=op, operator_role=role)
             else:
-                # Generic admin blank: intentionally NO expect_card_type — this
-                # button must be able to wipe any card type (Master included).
-                result = card_service.blank_existing_card(encoder=enc, hotel=state.hotel, session=s, operator=op)
+                result = card_service.create_clock_card(
+                    encoder=enc, hotel=state.hotel, session=s, operator=op, operator_role=role)
         _show_card_result(result_host, result)
 
     def on_submit(e: ft.ControlEvent) -> None:

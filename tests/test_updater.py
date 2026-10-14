@@ -85,15 +85,30 @@ def test_check_for_update_network_error_friendly(monkeypatch, code):
 
 def test_update_bat_excludes_per_hotel_identity_and_secrets():
     """El robocopy del update NO debe redistribuir hoteles/ ni pisar hotel.json."""
-    script = _build_update_bat_script(
-        Path("C:/tmp/payload"), Path("C:/app"), "Setra-CARDS.exe", Path("C:/tmp/stage")
-    )
-    assert "/XD hoteles drivers config data .browser-profile" in script
+    payload = Path("C:/tmp/payload")
+    script = _build_update_bat_script(payload, Path("C:/app"), "Setra-CARDS.exe", Path("C:/tmp/stage"))
+    # Excluded dirs are anchored to the payload root (a bare name matches at any depth)
+    for name in ("hoteles", "drivers", "config", "data", ".browser-profile"):
+        assert f'"{payload / name}"' in script
     assert "/XF Instalar.bat Desinstalar.bat LEEME.txt hotel.json .installed" in script
     # Constants stay in sync with the protocol-critical exclusions
     assert "hoteles" in ROBOCOPY_EXCLUDE_DIRS
     assert "hotel.json" in ROBOCOPY_EXCLUDE_FILES
     assert ".installed" in ROBOCOPY_EXCLUDE_FILES
+
+
+def test_update_bat_backs_up_first_and_restores_on_failure():
+    install = Path("C:/app")
+    script = _build_update_bat_script(Path("C:/tmp/payload"), install, "Setra-CARDS.exe", Path("C:/tmp/stage"))
+    backup = f'"{install.with_name("app.prev")}"'
+    lines = script.split("\r\n")
+    backup_step = next(i for i, ln in enumerate(lines) if "/MIR" in ln)
+    copy_step = next(i for i, ln in enumerate(lines) if ln.startswith('robocopy "C:\\tmp\\payload"'))
+    restore_step = next(i for i, ln in enumerate(lines) if ln.strip().startswith(f"robocopy {backup}"))
+    assert backup in lines[backup_step]
+    assert backup_step < copy_step < restore_step
+    # The old version is relaunched after a restore, not left closed
+    assert any("start" in ln and "Setra-CARDS.exe" in ln for ln in lines[restore_step:])
 
 
 def test_zip_normal_extraction():

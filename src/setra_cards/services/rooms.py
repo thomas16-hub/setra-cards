@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from setra_cards.services import action_log
-from setra_cards.storage.models import Room
+from setra_cards.storage.models import CardLog, Room
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,34 @@ def _next_room_no_id(
             f"se alcanzó el máximo de {ROOM_NO_ID_MAX} habitaciones por piso"
         )
     return next_id
+
+
+def _has_active_guest_card(session: Session, room_id: int, display: str | None = None) -> bool:
+    """True while a guest card for this room is still valid at the lock.
+
+    display also matches old rows logged without a room_id (same rule as
+    card_service.invalidate_active_guest_cards).
+    no_autoflush: update_room calls this with a half-applied floor move, and a
+    flush at that point would trip UNIQUE(building, floor, room_no_id).
+    """
+    room_match = CardLog.room_id == room_id
+    if display:
+        room_match = or_(room_match, and_(CardLog.room_id.is_(None), CardLog.room_display == display))
+    with session.no_autoflush:
+        return session.execute(
+            select(CardLog.id).where(
+                room_match,
+                CardLog.card_type == "Guest",
+                CardLog.success.is_(True),
+                CardLog.expires_at > datetime.now(),
+            ).limit(1)
+        ).first() is not None
+
+
+ACTIVE_CARD_ERROR = (
+    "La habitación {room} tiene una tarjeta de huésped vigente. Haga el checkout primero: "
+    "si no, la tarjeta del huésped quedaría abriendo otra puerta o dejaría de abrir la suya"
+)
 
 
 def _validate_byte_field(value: int, name: str) -> None:
@@ -124,6 +154,7 @@ def update_room(
     r = session.get(Room, room_id)
     if not r:
         raise ValueError("Habitacion no existe")
+    old_display = r.display_number  # legacy CardLog rows are keyed by it
     if display_number is not None:
         new_display = display_number.strip()
         if not new_display:
@@ -150,6 +181,9 @@ def update_room(
     # no_autoflush: the SELECT must not flush the half-applied move (old room_no_id
     # on the new floor), which would transiently violate the UNIQUE(building,floor,
     # room_no_id) constraint. The final consistent triple is flushed at commit.
+    if (building_changed or floor_changed) and _has_active_guest_card(session, r.id, old_display):
+        session.rollback()
+        raise ValueError(ACTIVE_CARD_ERROR.format(room=old_display))
     if building_changed or floor_changed:
         with session.no_autoflush:
             r.room_no_id = _next_room_no_id(session, r.building, r.floor, exclude_room_id=r.id)
@@ -178,7 +212,25 @@ def set_state(session: Session, room_id: int, state: str) -> Room:
 
 
 def delete_room(session: Session, room_id: int) -> None:
+    """Delete a room, keeping its card history.
+
+    Refused while a guest card is valid: a new room on that floor can reuse
+    the freed room_no_id, and the old guest card would open it. Once every
+    card has expired the lock rejects them anyway, so reuse is safe.
+    History rows keep room_display; only the FK is detached (it used to
+    raise IntegrityError and leave the session dirty).
+    """
     r = session.get(Room, room_id)
-    if r:
+    if not r:
+        return
+    if _has_active_guest_card(session, room_id, r.display_number):
+        raise ValueError(ACTIVE_CARD_ERROR.format(room=r.display_number))
+    try:
+        session.execute(
+            sql_update(CardLog).where(CardLog.room_id == room_id).values(room_id=None)
+        )
         session.delete(r)
         session.commit()
+    except Exception:
+        session.rollback()
+        raise

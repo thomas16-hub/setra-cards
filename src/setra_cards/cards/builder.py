@@ -48,6 +48,12 @@ def make_date_bytes(dt: datetime) -> bytes:
     return bytes([dt.year - 2000, dt.month, dt.day, dt.hour, dt.minute])
 
 
+# Block45 byte[1] on Guest cards: the vendor's card_status for Guest
+# (SETCARD.INI [0] card_status=33). All 65 guest cards in IssueLog.mdb carry
+# 0x21; Setra CARDS used to write the room's sequential id here.
+GUEST_STATUS = 0x21
+
+
 def _finalize_block46(block45: bytes, block46_prefix: bytes) -> bytes:
     """Append XOR checksum to block46 prefix (15 bytes -> 16 bytes)."""
     return block46_prefix + bytes([xor_checksum(block45, block46_prefix)])
@@ -79,13 +85,15 @@ def build_clock_card(now: datetime, sig: SystemSignature) -> CardData:
     """Build Clock card (0xA0).
 
     - Sets lock time to 'now'
-    - Block 45 tail: 01 01 01 00, then 5 zeros
+    - Block 45: [A0, 00, date(5), weekday, 01, 01, 00, 00*5]
+      weekday = ISO day (Mon=1..Sun=7), as the vendor writes it: 01 on a
+      Monday, 03 on a Wednesday in IssueLog.mdb. It used to be fixed at 01.
     - Block 46: [00*11, 01, 00, 95 B8, checksum]
     """
     block45 = (
         bytes([CARD_TYPE_CLOCK, 0x00])
         + make_date_bytes(now)
-        + bytes([0x01, 0x01, 0x01, 0x00])
+        + bytes([now.isoweekday(), 0x01, 0x01, 0x00])
         + bytes(5)
     )
 
@@ -101,7 +109,6 @@ def build_clock_card(now: datetime, sig: SystemSignature) -> CardData:
 
 
 def build_setting_card(
-    room: int,
     now: datetime,
     sig: SystemSignature,
     building: int = 1,
@@ -112,12 +119,13 @@ def build_setting_card(
 
     - Assigns room to lock (byte[14] = room_no_id, la cerradura valida por esto)
     - Valid ~2 hours from issue
-    - Block 45 (16 bytes): [80, room, date(5), expire(5), building, floor, room_no_id, 00]
+    - Block 45 (16 bytes): [80, building, date(5), expire(5), building, floor, room_no_id, 00]
+      byte[1] = building, as on every vendor setting card in IssueLog.mdb.
     - Block 46: [00*13, 95 B8, checksum]
     """
     expire = now + timedelta(hours=2)
     block45 = (
-        bytes([CARD_TYPE_SETTING, room])
+        bytes([CARD_TYPE_SETTING, building])
         + make_date_bytes(now)
         + make_date_bytes(expire)
         + bytes([building, floor, room_no_id, 0x00])
@@ -135,7 +143,6 @@ def build_setting_card(
 
 
 def build_guest_card(
-    room: int,
     now: datetime,
     checkout: datetime,
     sig: SystemSignature,
@@ -147,11 +154,11 @@ def build_guest_card(
 
     - Opens the assigned room (byte[14] = room_no_id, la cerradura valida por esto)
     - Valid from now until checkout
-    - Block 45 (16 bytes): [00, room, issue(5), checkout(5), building, floor, room_no_id, 00]
+    - Block 45 (16 bytes): [00, 21, issue(5), checkout(5), building, floor, room_no_id, 00]
     - Block 46: [00*13, 95 B8, checksum]
     """
     block45 = (
-        bytes([CARD_TYPE_GUEST, room])
+        bytes([CARD_TYPE_GUEST, GUEST_STATUS])
         + make_date_bytes(now)
         + make_date_bytes(checkout)
         + bytes([building, floor, room_no_id, 0x00])
@@ -173,11 +180,11 @@ def build_master_card(
     expire: datetime,
     sig: SystemSignature,
 ) -> CardData:
-    """Build Master card (0x40) — abre TODAS las cerraduras del sistema.
+    """Build Master card (0x60): opens every lock in the system.
 
-    Tail bytes 12-15 = 00 00 00 00 (sin tie a building/floor/room_no_id)
-    El card_type 0x40 en byte[0] es lo que el firmware identifica como
-    "master global". Valido en cualquier cerradura que tenga la firma del sistema.
+    Matches cards emitted by MF_System v5.0.2 (IssueLog.mdb):
+    [60, 00, issue(5), expire(5), 00 00 00 00]. The global tail was right
+    since v2.0.9; the type byte was wrong (0x40 = House Keeping).
     """
     block45 = (
         bytes([CARD_TYPE_MASTER, 0x00])
@@ -202,11 +209,11 @@ def build_laundry_card(
     expire: datetime,
     sig: SystemSignature,
 ) -> CardData:
-    """Build Laundry/Housekeeping card (0x20) — abre todas las cerraduras del sistema.
+    """Build Limpieza card: a short-lived Master (0x60) that opens every room.
 
-    Tail bytes 12-15 = 00 00 00 00. El card_type 0x20 hace que el firmware
-    reconozca la tarjeta como "housekeeping global" — valida solo firma del
-    sistema, no room_no_id especifico.
+    Decision 2026-10-14 (Thomas): cleaning staff open all rooms, the card
+    just expires in hours. Previously emitted 0x20, which the firmware reads
+    as a Check Out card, so it never opened anything.
     """
     block45 = (
         bytes([CARD_TYPE_LAUNDRY, 0x00])

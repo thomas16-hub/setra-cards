@@ -197,6 +197,11 @@ _watchdog_thread: threading.Thread | None = None
 _watchdog_stop = threading.Event()
 _watchdog_paused = threading.Event()
 
+# Hint-port rescan cadence while the last-known port keeps failing: first
+# failure, then every 6th tick (30 s at the default 5 s interval).
+RESCAN_EVERY_FAILED_TICKS = 6
+_failed_ticks = {"n": 0}
+
 
 def _watchdog_tick(state: AppState, last_port: str | None) -> str | None:
     """One reconnect check. Returns the port to remember for the next tick.
@@ -218,22 +223,38 @@ def _watchdog_tick(state: AppState, last_port: str | None) -> str | None:
                 return last_port
             enc = state.encoder
             if enc is not None and enc.is_connected:
+                _failed_ticks["n"] = 0
                 return state.encoder_port or last_port
+            _failed_ticks["n"] += 1
             port = state.encoder_port or last_port
-            if port:
+            ok = False
+            # Only re-open the known port when Windows lists it again: listing
+            # does no I/O, so an unplugged encoder costs nothing, and a replug
+            # on the same socket reconnects on the next 5 s tick.
+            if port and port in {p.device for p in list_com_ports()}:
                 logger.info("Watchdog: retrying %s", port)
-                connect_port(state, port)
-            else:
-                logger.info("Watchdog: auto-detecting (hint ports only)")
-                auto_connect(state, hint_only=True)
+                ok, _msg = connect_port(state, port)
+            if not ok and _failed_ticks["n"] % RESCAN_EVERY_FAILED_TICKS == 1:
+                # A replug into another USB socket comes back as another COM
+                # number. The scan opens and beeps every CP210x/CH340/FTDI
+                # device (fiscal printers, scales), so it is throttled to the
+                # first failure and then every 30 s, with or without a known port.
+                logger.info("Watchdog: rescanning hint ports")
+                ok, _msg = auto_connect(state, hint_only=True)
+            if ok:
+                _failed_ticks["n"] = 0
             return state.encoder_port or port
     except Exception as exc:
         logger.debug("Watchdog exception: %s", exc)
         return last_port
 
 
-def start_watchdog(state: AppState, interval: float = 30.0) -> None:
-    """Check every `interval` seconds and reconnect if the encoder dropped."""
+def start_watchdog(state: AppState, interval: float = 5.0) -> None:
+    """Check every `interval` seconds and reconnect if the encoder dropped.
+
+    5 s: a connected tick is only a non-blocking port probe, and an unplugged
+    encoder used to look "connected" in the UI for up to 30 s.
+    """
     global _watchdog_thread, _watchdog_stop
     with _watchdog_lock:
         thread = _watchdog_thread

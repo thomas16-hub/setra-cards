@@ -32,7 +32,9 @@ INSTALACION
 USUARIO INICIAL
 ---------------
 Operador:  Admin
-PIN:       1234
+PIN:       se genera al azar en la primera apertura y aparece en la
+           pantalla de ingreso UNA sola vez. Anotelo.
+Si se perdio: ejecutar Reset_PIN_Admin.bat (muestra un PIN temporal nuevo).
 La app pedira cambiar el PIN en el primer login.
 
 CARACTERISTICAS

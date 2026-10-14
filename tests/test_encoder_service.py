@@ -50,8 +50,15 @@ def _patch_driver(monkeypatch, *, beep_ok=True, open_exc=None):
     return created
 
 
+def _listed(*devices):
+    return lambda: [ComPortInfo(d, "Silicon Labs CP210x", "Silicon Labs", True) for d in devices]
+
+
 @pytest.fixture(autouse=True)
-def _watchdog_cleanup():
+def _watchdog_cleanup(monkeypatch):
+    # Default: Windows lists COM3 and COM4; the failure counter starts fresh.
+    monkeypatch.setattr(encoder_service, "list_com_ports", _listed("COM3", "COM4"))
+    monkeypatch.setitem(encoder_service._failed_ticks, "n", 0)
     yield
     encoder_service.stop_watchdog(join_timeout=1.0)
     encoder_service._watchdog_paused.clear()
@@ -173,10 +180,74 @@ def test_watchdog_tick_retries_last_known_port_after_failed_reconnect(monkeypatc
         encoder_service, "connect_port",
         lambda state, port: attempts.append(port) or (False, "nope"),
     )
+    monkeypatch.setattr(encoder_service, "auto_connect", lambda state, hint_only=False: (False, "nope"))
     state = FakeState()  # connect_port failure already cleared encoder_port
     remembered = encoder_service._watchdog_tick(state, "COM3")
     assert attempts == ["COM3"]
     assert remembered == "COM3"  # NOT lost — next tick retries the same port
+
+
+def test_watchdog_tick_finds_encoder_on_a_new_com_number(monkeypatch):
+    # Encoder replugged into another USB socket: COM3 is gone, it is now COM4.
+    monkeypatch.setattr(encoder_service, "connect_port", lambda state, port: (False, "gone"))
+    scans = []
+
+    def fake_auto(state, hint_only=False):
+        scans.append(hint_only)
+        state.encoder_port = "COM4"
+        return True, "ok"
+
+    monkeypatch.setattr(encoder_service, "auto_connect", fake_auto)
+    state = FakeState()
+    assert encoder_service._watchdog_tick(state, "COM3") == "COM4"
+    assert scans == [True]  # never a blind scan of every port
+
+
+def test_watchdog_rescan_is_throttled(monkeypatch):
+    monkeypatch.setattr(encoder_service, "connect_port", lambda state, port: (False, "gone"))
+    scans = []
+    monkeypatch.setattr(encoder_service, "auto_connect",
+                        lambda state, hint_only=False: scans.append(1) or (False, "nope"))
+    for _ in range(12):
+        encoder_service._watchdog_tick(FakeState(), "COM3")
+    assert len(scans) == 2  # ticks 1 and 7, not all 12
+
+
+def test_watchdog_without_known_port_is_throttled_too(monkeypatch):
+    # PC with the encoder unplugged since startup: no port has ever been known.
+    scans = []
+    monkeypatch.setattr(encoder_service, "auto_connect",
+                        lambda state, hint_only=False: scans.append(hint_only) or (False, "nope"))
+    for _ in range(12):
+        encoder_service._watchdog_tick(FakeState(), None)
+    assert scans == [True, True]  # not 12 beeps at the front-desk printers
+
+
+def test_watchdog_does_not_open_a_port_windows_no_longer_lists(monkeypatch):
+    monkeypatch.setattr(encoder_service, "list_com_ports", _listed("COM4"))  # COM3 unplugged
+    opened = []
+    monkeypatch.setattr(encoder_service, "connect_port",
+                        lambda state, port: opened.append(port) or (False, "gone"))
+    monkeypatch.setattr(encoder_service, "auto_connect", lambda state, hint_only=False: (False, "nope"))
+    for _ in range(5):
+        encoder_service._watchdog_tick(FakeState(), "COM3")
+    assert opened == []  # no I/O to a missing port
+
+
+def test_watchdog_counter_resets_after_reconnecting_elsewhere(monkeypatch):
+    monkeypatch.setattr(encoder_service, "connect_port", lambda state, port: (False, "gone"))
+    scans = []
+
+    def fake_auto(state, hint_only=False):
+        scans.append(1)
+        state.encoder_port = "COM4"
+        return True, "ok"
+
+    monkeypatch.setattr(encoder_service, "auto_connect", fake_auto)
+    encoder_service._watchdog_tick(FakeState(), "COM3")
+    assert encoder_service._failed_ticks["n"] == 0
+    encoder_service._watchdog_tick(FakeState(), "COM9")  # next drop rescans at once
+    assert len(scans) == 2
 
 
 def test_watchdog_tick_without_any_port_uses_hint_only_autoconnect(monkeypatch):

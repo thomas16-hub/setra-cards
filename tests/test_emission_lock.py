@@ -109,7 +109,7 @@ def test_second_emit_fails_fast_while_one_in_progress(monkeypatch, encoder, hote
     result_holder = {}
 
     def _run_master():
-        result_holder["master"] = cs.create_master_card(
+        result_holder["master"] = cs.create_master_card(operator_role="manager", 
             encoder=encoder, hotel=hotel, session=session,
             valid_until=datetime.now() + timedelta(days=1), operator="op1",
         )
@@ -184,6 +184,8 @@ def test_watchdog_tick_runs_when_lock_free(monkeypatch):
         encoder_service, "connect_port",
         lambda state, port: connect_calls.append(port) or (True, "ok"),
     )
+    monkeypatch.setattr(encoder_service, "list_com_ports", lambda: [
+        encoder_service.ComPortInfo("COM3", "CP210x", "Silicon Labs", True)])
     state = SimpleNamespace(encoder=None, encoder_port="COM3")
     encoder_service._watchdog_tick(state, "COM3")
     assert connect_calls == ["COM3"]
@@ -195,7 +197,7 @@ def test_lock_released_after_normal_completion(monkeypatch, encoder, hotel, sess
     monkeypatch.setattr(cs, "write_card", lambda *a, **k: WriteResult(True, UID))
     monkeypatch.setattr(cs, "build_clock_card", lambda **k: b"\x00" * 48)
 
-    result = cs.create_clock_card(encoder=encoder, hotel=hotel, session=session, operator="op")
+    result = cs.create_clock_card(operator_role="manager", encoder=encoder, hotel=hotel, session=session, operator="op")
     assert result.ok is True
     # Lock must be free again — re-acquire non-blocking proves it.
     assert encoder_service._emission_lock.acquire(blocking=False)
@@ -206,7 +208,7 @@ def test_lock_released_after_hardware_error(monkeypatch, encoder, hotel, session
     monkeypatch.setattr(cs, "write_card", lambda *a, **k: WriteResult(False, None, error="boom"))
     monkeypatch.setattr(cs, "build_clock_card", lambda **k: b"\x00" * 48)
 
-    result = cs.create_clock_card(encoder=encoder, hotel=hotel, session=session, operator="op")
+    result = cs.create_clock_card(operator_role="manager", encoder=encoder, hotel=hotel, session=session, operator="op")
     assert result.ok is False
     assert encoder_service._emission_lock.acquire(blocking=False)
     encoder_service._emission_lock.release()
@@ -222,7 +224,7 @@ def test_lock_released_after_db_failure(monkeypatch, encoder, hotel, session):
 
     monkeypatch.setattr(cs, "_log_emission", _boom)
 
-    result = cs.create_clock_card(encoder=encoder, hotel=hotel, session=session, operator="op")
+    result = cs.create_clock_card(operator_role="manager", encoder=encoder, hotel=hotel, session=session, operator="op")
     assert result.ok is False
     assert "base de datos" in result.error
     assert encoder_service._emission_lock.acquire(blocking=False)

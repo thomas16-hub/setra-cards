@@ -24,6 +24,11 @@ class HotelConfig:
     des_key: bytes
     sector: int = 11
     checkout_time: str = "12:00"
+    # True when no readable hotel.json was found and the Demo values are in
+    # use. Not blocking: the Demo signature (95 B8) is the one every SETRA
+    # hotel uses, so a PC missing hotel.json still writes working cards, but
+    # the operator must see that the hotel identity is not configured.
+    is_fallback: bool = False
 
 
 @dataclass
@@ -78,6 +83,7 @@ def _demo_config() -> HotelConfig:
         city="Local",
         signature=DEFAULT_SIGNATURE,
         des_key=b"god\x00\x00\x00\x00\x00",
+        is_fallback=True,
     )
 
 

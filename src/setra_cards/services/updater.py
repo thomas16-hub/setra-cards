@@ -235,10 +235,33 @@ ROBOCOPY_EXCLUDE_DIRS = ("hoteles", "drivers", "config", "data", ".browser-profi
 ROBOCOPY_EXCLUDE_FILES = ("Instalar.bat", "Desinstalar.bat", "LEEME.txt", "hotel.json", ".installed")
 
 
+def backup_dir_for(install_dir: Path) -> Path:
+    """Sibling folder holding the previous version (overwritten each update)."""
+    return install_dir.with_name(install_dir.name + ".prev")
+
+
+def _excluded_dirs(root: Path) -> str:
+    # Anchored to the top level of `root`: a bare name in /XD matches at ANY
+    # depth, so a package folder called "data" inside _internal would never
+    # be updated.
+    return " ".join(f'"{root / name}"' for name in ROBOCOPY_EXCLUDE_DIRS)
+
+
 def _build_update_bat_script(payload_dir: Path, install_dir: Path, exe_name: str, staging: Path) -> str:
-    """Build the apply_update.bat content (extracted for testability)."""
-    xd = " ".join(ROBOCOPY_EXCLUDE_DIRS)
+    """Build the apply_update.bat content (extracted for testability).
+
+    1. Mirror the current install to <install>.prev (abort, untouched, if that fails).
+    2. Copy the new version over the install.
+    3. If the copy fails, restore <install>.prev and relaunch the old version:
+       a half-copied install used to leave the front desk without the app.
+    Robocopy exit codes 0-7 are success, 8+ are failures.
+    """
+    backup = backup_dir_for(install_dir)
     xf = " ".join(ROBOCOPY_EXCLUDE_FILES)
+    # /R:3 /W:2: robocopy's default is 1,000,000 retries 30 s apart, so one
+    # file still locked by the closing app would hang the update forever.
+    quiet = "/R:3 /W:2 /NFL /NDL /NJH /NJS /NP >nul"
+    relaunch = f'start "" "{install_dir}\\{exe_name}"\r\n'
     return (
         "@echo off\r\n"
         "chcp 65001 >nul 2>&1\r\n"
@@ -247,15 +270,29 @@ def _build_update_bat_script(payload_dir: Path, install_dir: Path, exe_name: str
         "timeout /t 3 /nobreak >nul\r\n"
         f'taskkill /F /IM "{exe_name}" >nul 2>&1\r\n'
         "timeout /t 2 /nobreak >nul\r\n"
-        f'robocopy "{payload_dir}" "{install_dir}" /E /XD {xd} /XF {xf} /NFL /NDL /NJH /NJS /NP >nul\r\n'
+        "echo Respaldando la version actual...\r\n"
+        f'robocopy "{install_dir}" "{backup}" /MIR {quiet}\r\n'
         "if errorlevel 8 (\r\n"
-        "  echo ERROR aplicando actualizacion. Revisa el log.\r\n"
+        "  echo No se pudo respaldar la version actual. La actualizacion se cancelo.\r\n"
+        f"  {relaunch}"
         "  pause\r\n"
         "  exit /b 1\r\n"
         ")\r\n"
-        f'start "" "{install_dir}\\{exe_name}"\r\n'
-        f'rmdir /S /Q "{staging}" >nul 2>&1\r\n'
-        "exit /b 0\r\n"
+        "echo Copiando la version nueva...\r\n"
+        f'robocopy "{payload_dir}" "{install_dir}" /E /XD {_excluded_dirs(payload_dir)} /XF {xf} {quiet}\r\n'
+        "if errorlevel 8 (\r\n"
+        "  echo ERROR copiando la version nueva. Restaurando la version anterior...\r\n"
+        f'  robocopy "{backup}" "{install_dir}" /E /XD {_excluded_dirs(backup)} /XF {xf} {quiet}\r\n'
+        f"  {relaunch}"
+        "  echo Se restauro la version anterior. Avise a soporte SETRA.\r\n"
+        "  pause\r\n"
+        "  exit /b 1\r\n"
+        ")\r\n"
+        f"{relaunch}"
+        # This .bat lives inside staging. "(goto) 2>nul" detaches cmd from the
+        # file first, so deleting its own folder does not end in "cannot find
+        # the path" (verified by running the script against real folders).
+        f'(goto) 2>nul & rmdir /S /Q "{staging}" >nul 2>&1 & exit /b 0\r\n'
     )
 
 

@@ -369,7 +369,11 @@ def _open_room_dialog(page: ft.Page, state, room: Room | None, on_done) -> None:
 
         def do_delete() -> None:
             with sf() as s:
-                rooms_service.delete_room(s, room.id)
+                try:
+                    rooms_service.delete_room(s, room.id)
+                except ValueError as exc:  # active guest card: checkout first
+                    show_toast(page, str(exc), "error")
+                    return
                 log_action(s, "room_delete", state.operator.name if state.operator else "?",
                            f"Hab. {room.display_number}")
             show_toast(page, f"Habitacion {room.display_number} eliminada", "info")

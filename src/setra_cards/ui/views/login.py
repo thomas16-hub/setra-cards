@@ -4,7 +4,7 @@ from __future__ import annotations
 import flet as ft
 
 from setra_cards.core.app_state import OperatorSession, get_state
-from setra_cards.services.auth import authenticate, ensure_seed_admin, update_pin
+from setra_cards.services.auth import authenticate, ensure_seed_admin, pop_seed_pin, update_pin
 from setra_cards.storage.database import init_db
 from setra_cards.ui import theme
 from setra_cards.ui.components.basics import show_toast
@@ -35,10 +35,54 @@ def _setra_mark(size: int = 72) -> ft.Container:
     )
 
 
+def _seed_pin_notice(fresh_pin: str | None, admin_pending: bool) -> ft.Control:
+    """First-run credentials: the real one-time PIN, never a made-up default.
+
+    fresh_pin is only known in the process that generated it; after a restart
+    the Admin is still pending but the PIN can only be recovered with
+    Reset_PIN_Admin.bat (it prints a new one).
+    """
+    if fresh_pin:
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text("Primer ingreso", size=12, weight=ft.FontWeight.W_700, color=theme.GOLD_LIGHT),
+                    ft.Text(f"Usuario: Admin   ·   PIN: {fresh_pin}", size=16,
+                            weight=ft.FontWeight.W_700, color=theme.TEXT, selectable=True),
+                    ft.Text("Anótelo: solo se muestra esta vez. La app le pedirá cambiarlo al entrar.",
+                            size=11, color=theme.TEXT_MUTED, text_align=ft.TextAlign.CENTER),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+            ),
+            width=340,
+            padding=ft.Padding(14, 12, 14, 12),
+            bgcolor=theme.SURFACE_ALT,
+            border=ft.Border.all(1, theme.GOLD),
+            border_radius=theme.INPUT_RADIUS,
+        )
+    return ft.Container(
+        visible=admin_pending,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=13, color=theme.TEXT_LIGHT),
+                ft.Text(
+                    "¿Sin PIN del Admin? Ejecute Reset_PIN_Admin.bat en la carpeta de la app",
+                    size=11,
+                    color=theme.TEXT_LIGHT,
+                ),
+            ],
+            spacing=6,
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+    )
+
+
 def build(page: ft.Page) -> ft.Control:
     sf = init_db()
     with sf() as s:
         ensure_seed_admin(s)
+        fresh_pin = pop_seed_pin()
         from setra_cards.storage.models import Operator
         operators = s.query(Operator).filter(Operator.active.is_(True)).order_by(Operator.name).all()
         op_names = [op.name for op in operators]
@@ -148,21 +192,7 @@ def build(page: ft.Page) -> ft.Control:
                     ),
                 ),
                 ft.Container(height=20),
-                ft.Container(
-                    visible=show_default_hint,
-                    content=ft.Row(
-                        [
-                            ft.Icon(ft.Icons.INFO_OUTLINE, size=13, color=theme.TEXT_LIGHT),
-                            ft.Text(
-                                "Usuario inicial:  Admin  /  PIN: 1234  (cambiar tras primer ingreso)",
-                                size=11,
-                                color=theme.TEXT_LIGHT,
-                            ),
-                        ],
-                        spacing=6,
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    ),
-                ),
+                _seed_pin_notice(fresh_pin, show_default_hint),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=8,
